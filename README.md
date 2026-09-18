@@ -4,6 +4,55 @@ Ultra-low latency signal processing library for neural data (work in progress)
 **Design requirements**: Re-reference, filter, and extract features from 2048-channel 30 kHz microelectrode array data in real-time with an output rate of up to 1 kHz   
 **Constraints**: Runs on desktop PCs and laptops (with or without GPUs) using Linux (preferred) or macOS
 
+## Getting started
+
+### 1. Create the environment
+
+On macOS, or whenever an exact lockfile is not required:
+
+```bash
+conda env create -f environment.min.yml
+conda activate neurostream
+```
+
+`environment.yml` is an exact export from a Linux machine. It pins Linux-only
+packages and will not solve on macOS, so prefer it only when reproducing that
+environment specifically.
+
+### 2. Download the example recording
+
+```bash
+./scripts/fetch_example_data.sh
+```
+
+This writes `data/NSP1_aligned.ns6` (~706 MiB), which is git-ignored.
+
+### 3. Compute thresholds and re-referencing parameters
+
+`calc_params.py` and the notebook both resolve `utils` and their data paths
+relative to `notebooks/`, so run them from there:
+
+```bash
+cd notebooks
+python calc_params.py \
+    -f ../data/NSP1_aligned.ns6 \
+    -o ../data/NSP1_aligned_params.json \
+    -t -3.5 --reref lrr --plot_spike_panel
+```
+
+This measures per-channel noise and writes voltage thresholds and
+re-referencing weights to the JSON file. `--plot_spike_panel` also saves spike
+panels next to it, which are worth a look before continuing.
+
+### 4. Run the pipeline
+
+```bash
+jupyter lab baseline.ipynb
+```
+
+The notebook reads the recording and the JSON from step 3, processes the data
+one millisecond at a time, and plots spikes and spike-band power.
+
 ## Signal Processing
 
 This section summarizes the standard signal processing steps used on data from microelectrode arrays. For a code example, see [baseline.ipynb](./notebooks/baseline.ipynb).
