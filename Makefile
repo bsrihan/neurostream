@@ -11,5 +11,5 @@ format:
 
 export_env:
 	echo "Exporting Python environment"
-	conda env export --no-build > environment.yml
+	conda env export --no-build | grep -v '^prefix:' > environment.yml
 	pip list --exclude-editable --format=freeze > requirements.txt

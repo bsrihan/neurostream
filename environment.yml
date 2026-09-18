@@ -154,4 +154,3 @@ dependencies:
       - websocket-client==1.8.0
       - widgetsnbextension==4.0.14
       - yapf==0.43.0
-prefix: /home/yali4/lib/miniconda3/envs/neurostream
