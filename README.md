@@ -35,7 +35,9 @@ fails with `NoSuchKernel: neurostream`.
 ./scripts/fetch_example_data.sh
 ```
 
-This writes `data/NSP1_aligned.ns6` (~706 MiB), which is git-ignored.
+This writes `data/NSP1_aligned.ns6` (~706 MiB), which is git-ignored. The file
+holds 128 channels sampled at 30 kHz for about 96 seconds; the 1024 electrodes
+in the dataset name are split across several NSPs.
 
 ### 3. Compute thresholds and re-referencing parameters
 
@@ -47,12 +49,20 @@ cd notebooks
 python calc_params.py \
     -f ../data/NSP1_aligned.ns6 \
     -o ../data/NSP1_aligned_params.json \
-    -t -3.5 --reref lrr --plot_spike_panel
+    -t -3.5 --reref lrr --plot_spike_panel \
+    -d 60
 ```
 
 This measures per-channel noise and writes voltage thresholds and
 re-referencing weights to the JSON file. `--plot_spike_panel` also saves spike
-panels next to it, which are worth a look before continuing.
+panels next to it, which are worth a look before continuing. Takes about a
+minute for the example file.
+
+`-d 60` caps the calculation at the first 60 seconds. Without it the entire
+recording is loaded as float64 — roughly 3 GB for the example file, before the
+temporaries `sosfiltfilt` allocates on top — which is enough to exhaust a 16 GB
+machine. A minute of data is also what the thresholding section below
+recommends, and `baseline.ipynb` only processes the first 10 seconds anyway.
 
 ### 4. Run the pipeline
 
