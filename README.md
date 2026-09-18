@@ -19,6 +19,16 @@ conda activate neurostream
 packages and will not solve on macOS, so prefer it only when reproducing that
 environment specifically.
 
+Then register the Jupyter kernel that `baseline.ipynb` asks for:
+
+```bash
+python -m ipykernel install --user --name neurostream
+```
+
+The notebook pins `kernelspec.name = neurostream` in its metadata, so without
+this step Jupyter reports the kernel as missing and non-interactive execution
+fails with `NoSuchKernel: neurostream`.
+
 ### 2. Download the example recording
 
 ```bash
