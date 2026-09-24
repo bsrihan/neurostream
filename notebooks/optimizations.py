@@ -2,12 +2,12 @@
 
 Lossless (same spikes and spike-band power as ``baseline.ipynb``):
 
-- Re-reference each multi-electrode array on its own thread. Arrays are the
-  re-referencing groups. Channels in different groups never mix, so the groups
-  can run concurrently.
-- After re-referencing, filter and extract features for many channels at once.
-  Each channel is an independent task. A thread pool runs as many of those
-  tasks as there are cores (or one thread per channel, if asked).
+- Re-reference each multi-electrode array with a cached ``(I - P)`` block.
+  Arrays do not share weights, so the full channel-by-channel matrix is never
+  formed.
+- Run the acausal reverse FIR as one matrix multiply across every channel.
+  A per-millisecond thread pool was slower than the baseline loop, so the CPU
+  path does not use one.
 - Optional GPU filtering. Apple MPS is preferred, then an integrated CUDA GPU,
   then a discrete CUDA GPU. Those first two share memory with the CPU, so the
   2048-channel buffer does not have to be copied across a bus.
@@ -24,19 +24,44 @@ Lossy (opt in with ``decimate=True``):
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 import scipy.signal
 import scipy.sparse
 
-from utils import build_filter, rereference_data
+from utils import build_filter
 
 logger = logging.getLogger(__name__)
+
+
+def _fir_band_matrix(rev_win, buffer_len, n_out):
+    """Dense band whose multiply is the valid FIR, once the buffer is finite.
+
+    A dense multiply also visits the explicit zeros outside each output's taps.
+    Those zeros do not change a finite buffer. They do poison a NaN warmup
+    sample (``0 * NaN``), so the caller has to use the direct sum until the
+    initial NaN prefix has been shifted out.
+    """
+    band = np.zeros((buffer_len, n_out), dtype=np.float64)
+    n_taps = rev_win.shape[0]
+    for index in range(n_out):
+        band[index:index + n_taps, index] = rev_win
+    return band
+
+
+def _apply_fir(rev_buffer, rev_win, n_out, filt, band, leading_nans):
+    if leading_nans == 0:
+        # One BLAS multiply across channels. Same values as np.convolve once
+        # the NaN warmup prefix has shifted out; until then the direct sum
+        # below is required, because a dense multiply treats 0 * NaN as NaN.
+        filt[:, :] = rev_buffer @ band
+        return
+    for channel in range(filt.shape[0]):
+        filt[channel, ::-1] = np.convolve(rev_buffer[channel, ::-1],
+                                          rev_win, "valid")
 
 # 4 ms acausal tail, in seconds. At 30 kHz this is the notebook's lag of 120
 # samples; after 2x decimation it is 60 samples at 15 kHz.
@@ -252,15 +277,6 @@ def _empty_like(tensor):
     return torch.empty_like(tensor)
 
 
-def _blas_limits():
-    """Keep BLAS from starting its own threads inside a channel worker."""
-    try:
-        from threadpoolctl import threadpool_limits
-    except ImportError:
-        return contextlib.nullcontext()
-    return threadpool_limits(limits=1)
-
-
 def _channel_blocks(n_channels, n_workers):
     n_workers = max(1, min(int(n_workers), int(n_channels)))
     edges = np.linspace(0, n_channels, n_workers + 1, dtype=int)
@@ -268,6 +284,43 @@ def _channel_blocks(n_channels, n_workers):
         slice(int(start), int(stop))
         for start, stop in zip(edges[:-1], edges[1:]) if stop > start
     ]
+
+
+def _reref_plan(groups, reref_params):
+    """Cached ``I - P`` for each group.
+
+    Returns ``(blocks, batched_mats, group_size)``. ``batched_mats`` is a
+    stacked ``(n_groups, group_size, group_size)`` array when every group is
+    the same length and the groups tile the channels in order. Otherwise it
+    is ``None`` and ``blocks`` is applied one group at a time.
+    """
+    blocks = []
+    lengths = []
+    contiguous = True
+    for group in groups:
+        idx = np.asarray(group, dtype=np.intp)
+        mat = np.eye(idx.size, dtype=np.float64) - reref_params[np.ix_(idx, idx)]
+        mat = np.ascontiguousarray(mat)
+        if idx.size > 1 and np.all(idx[1:] == idx[:-1] + 1):
+            index = slice(int(idx[0]), int(idx[-1]) + 1)
+        elif idx.size == 1:
+            index = slice(int(idx[0]), int(idx[0]) + 1)
+        else:
+            index = idx
+            contiguous = False
+        blocks.append((index, mat))
+        lengths.append(int(idx.size))
+    batched = None
+    group_size = None
+    if contiguous and lengths and len(set(lengths)) == 1:
+        group_size = lengths[0]
+        tiled = all(
+            isinstance(index, slice) and index.start == group_index * group_size
+            and index.stop == (group_index + 1) * group_size
+            for group_index, (index, _) in enumerate(blocks))
+        if tiled and group_size * len(blocks) == reref_params.shape[0]:
+            batched = np.stack([mat for _, mat in blocks])
+    return blocks, batched, group_size if batched is not None else None
 
 
 def _normalize_groups(n_channels, reref_groups):
@@ -346,11 +399,15 @@ class OptimizedProcessor:
     """Stream 30 kHz neural data with the README optimizations turned on.
 
     Call ``process_window`` once per millisecond, or ``process_recording`` on
-    an array shaped ``(n_channels, n_samples)``. Re-referencing groups run on
-    separate threads. Filtering and feature extraction then run across
-    channels. Set ``use_gpu="auto"`` to filter on MPS or CUDA when a device is
-    present, ``device`` to force one (including ``"cpu"``), and
-    ``decimate=True`` for the lossy 15 kHz path.
+    an array shaped ``(n_channels, n_samples)``. Each re-referencing group is
+    applied with a cached block matrix, and the acausal reverse FIR is one
+    multiply across channels. Set ``use_gpu="auto"`` to filter on MPS or CUDA
+    when a device is present, ``device`` to force one (including ``"cpu"``),
+    and ``decimate=True`` for the lossy 15 kHz path.
+
+    ``per_array_threads`` and ``per_channel_threads`` are accepted so existing
+    callers keep working. A thread pool around a 1 ms frame was slower than
+    the baseline loop, so those flags do not change the CPU path.
 
     The processor is stateful (filter delays, decimator phase). Use it from
     one thread, and do not overlap ``process_window`` calls.
@@ -444,7 +501,6 @@ class OptimizedProcessor:
             (self.n_channels, self.samples_per_window - 1), dtype=bool)
         self._reref_window = np.zeros(
             (self.n_channels, self.samples_per_window), dtype=np.float64)
-        self._raw_proc = None
 
         self._decimator = None
         if self.decimate:
@@ -472,25 +528,27 @@ class OptimizedProcessor:
             self.channel_workers = 1
         self._channel_blocks = _channel_blocks(self.n_channels,
                                                self.channel_workers)
-
-        self._array_pool = None
-        self._channel_pool = None
-        if per_array_threads and len(self.groups) > 1:
-            self._array_pool = ThreadPoolExecutor(
-                max_workers=len(self.groups),
-                thread_name_prefix="mea",
-            )
-        if len(self._channel_blocks) > 1:
-            self._channel_pool = ThreadPoolExecutor(
-                max_workers=len(self._channel_blocks),
-                thread_name_prefix="channel",
-            )
+        self._reref_blocks, self._reref_mats, self._reref_group_size = (
+            _reref_plan(self.groups, self.reref_params))
+        self._raw_buf = np.empty((self.n_channels, self.samples_per_window),
+                                 dtype=np.float64)
+        self._rev_win = None
+        self._fir_band = None
+        self._leading_nans = 0
+        self._use_fast_fir = (not self.use_gpu and not self.causal
+                              and self.rev_win is not None)
+        if self.rev_win is not None:
+            self._rev_win = np.ascontiguousarray(self.rev_win, dtype=np.float64)
+            self._fir_band = _fir_band_matrix(self._rev_win,
+                                              self.rev_buffer.shape[1],
+                                              self.samples_per_window)
+            self._leading_nans = self.rev_buffer.shape[1]
 
         self._closed = False
         logger.info(
-            "processor arrays=%d channel_workers=%d gpu=%s decimate=%s",
+            "processor arrays=%d fast_fir=%s gpu=%s decimate=%s",
             len(self.groups),
-            len(self._channel_blocks),
+            self._use_fast_fir,
             self.gpu_device if self.use_gpu else "off",
             self.decimate,
         )
@@ -554,11 +612,6 @@ class OptimizedProcessor:
         if self._closed:
             return
         self._closed = True
-        for pool in (self._array_pool, self._channel_pool):
-            if pool is not None:
-                pool.shutdown(wait=True)
-        self._array_pool = None
-        self._channel_pool = None
 
     def __enter__(self):
         return self
@@ -580,45 +633,13 @@ class OptimizedProcessor:
         ``sample_rate``. When decimating, those samples are low-pass filtered
         and downsampled before re-referencing.
         """
-        if self._closed:
-            raise RuntimeError("processor is closed")
-        raw = np.asarray(raw)
-        expected = (self.n_channels, self.input_samples_per_window)
-        if raw.shape != expected:
-            raise ValueError(f"expected raw shape {expected}, got {raw.shape}")
-
-        if self._decimator is not None:
-            processed = self._decimator.process(raw)
-            if processed.shape[1] != self.samples_per_window:
-                raise RuntimeError(
-                    "decimator returned "
-                    f"{processed.shape[1]} samples, expected "
-                    f"{self.samples_per_window}")
-        else:
-            processed = raw
-        self._raw_proc = processed
-
-        self._map(self._array_pool, self._reref_one, self.groups)
-        if self.use_gpu:
-            self._gpu_filter()
-            self._map(self._channel_pool, self._features_block,
-                      self._channel_blocks)
-        else:
-            self._map(self._channel_pool, self._filter_and_features_block,
-                      self._channel_blocks)
-
-        channels, relative = np.nonzero(self._crossings)
-        if channels.size == 0:
-            crossing_events = np.zeros((0, 2), dtype=np.int32)
-        else:
-            crossing_events = np.column_stack(
-                (channels, relative + 1)).astype(np.int32, copy=False)
+        self._compute_window(raw)
         return WindowResult(
             rereferenced=self._reref_window.copy(),
             filtered=self.filt_buffer.copy(),
             spikes=self._spikes_win.copy(),
             spike_band_power=self._sbp_win.copy(),
-            crossing_events=crossing_events,
+            crossing_events=self._crossing_events(),
         )
 
     def process_recording(self, data):
@@ -647,20 +668,21 @@ class OptimizedProcessor:
 
         for index in range(n_windows):
             start = index * samples_per_window
-            window = self.process_window(data[:, start:start + samples_per_window])
+            self._compute_window(data[:, start:start + samples_per_window])
             out_start = index * self.samples_per_window
             out_stop = out_start + self.samples_per_window
-            rereferenced[:, out_start:out_stop] = window.rereferenced
-            filtered[:, out_start:out_stop] = window.filtered
-            spike_band[:, index] = window.spike_band_power
+            rereferenced[:, out_start:out_stop] = self._reref_window
+            filtered[:, out_start:out_stop] = self.filt_buffer
+            spike_band[:, index] = self._sbp_win
             if spikes is not None:
-                spikes[:, index] = window.spikes
-            fired = np.flatnonzero(window.spikes)
+                spikes[:, index] = self._spikes_win
+            fired = np.flatnonzero(self._spikes_win)
             if fired.size:
                 times = np.full(fired.size, index, dtype=np.int32)
                 binned_events.append(np.column_stack((fired, times)))
-            if window.crossing_events.size:
-                absolute = window.crossing_events.copy()
+            crossing_events = self._crossing_events()
+            if crossing_events.size:
+                absolute = crossing_events
                 absolute[:, 1] += out_start
                 crossing_parts.append(absolute)
 
@@ -693,26 +715,66 @@ class OptimizedProcessor:
             decimated=self.decimate,
         )
 
-    def _map(self, pool, fn, items):
-        items = list(items)
-        if pool is None or len(items) <= 1:
-            for item in items:
-                fn(item)
+    def _compute_window(self, raw):
+        if self._closed:
+            raise RuntimeError("processor is closed")
+        raw = np.asarray(raw)
+        expected = (self.n_channels, self.input_samples_per_window)
+        if raw.shape != expected:
+            raise ValueError(f"expected raw shape {expected}, got {raw.shape}")
+
+        if self._decimator is not None:
+            processed = self._decimator.process(raw)
+            if processed.shape[1] != self.samples_per_window:
+                raise RuntimeError(
+                    "decimator returned "
+                    f"{processed.shape[1]} samples, expected "
+                    f"{self.samples_per_window}")
+        else:
+            processed = raw
+        np.copyto(self._raw_buf, processed)
+        self._apply_reref()
+        if self.use_gpu:
+            self._gpu_filter()
+        elif self._use_fast_fir:
+            self._fast_acausal_fir()
+        elif self.causal:
+            self._forward_sos(self._reref_window, self.filt_buffer)
+        else:
+            self._apply_filter(slice(None))
+        self._features_all()
+
+    def _apply_reref(self):
+        raw = self._raw_buf
+        out = self._reref_window
+        if self._reref_group_size is not None:
+            grouped = raw.reshape(-1, self._reref_group_size, raw.shape[1])
+            out[:] = (self._reref_mats @ grouped).reshape(out.shape)
             return
-        list(pool.map(fn, items))
+        for index, mat in self._reref_blocks:
+            out[index] = mat @ np.ascontiguousarray(raw[index])
 
-    def _reref_one(self, channels):
-        with _blas_limits():
-            idx = np.asarray(channels, dtype=np.intp)
-            self._reref_window[idx] = rereference_data(
-                self._raw_proc[idx],
-                self.reref_params[np.ix_(idx, idx)],
-            )
+    def _forward_sos(self, data, dest):
+        dest[:, :], self.zi[:, :] = scipy.signal.sosfilt(self.sos,
+                                                         data,
+                                                         axis=1,
+                                                         zi=self.zi)
 
-    def _filter_and_features_block(self, sl):
-        with _blas_limits():
-            self._apply_filter(sl)
-            self._features_block(sl)
+    def _fast_acausal_fir(self):
+        n_samp = self.samples_per_window
+        buf = self.rev_buffer
+        buf[:, :-n_samp] = buf[:, n_samp:]
+        self._forward_sos(self._reref_window, buf[:, -n_samp:])
+        self._leading_nans = max(0, self._leading_nans - n_samp)
+        _apply_fir(buf, self._rev_win, n_samp, self.filt_buffer,
+                   self._fir_band, self._leading_nans)
+
+    def _crossing_events(self):
+        channels, relative = np.nonzero(self._crossings)
+        if channels.size == 0:
+            return np.zeros((0, 2), dtype=np.int32)
+        return np.column_stack((channels, relative + 1)).astype(np.int32,
+                                                               copy=False)
 
     def _apply_filter(self, sl):
         data = self._reref_window[sl]
@@ -731,14 +793,13 @@ class OptimizedProcessor:
             return self.rev_zi[sl]
         return self.rev_zi[:, sl, :]
 
-    def _features_block(self, sl):
-        filtered = self.filt_buffer[sl]
-        thresholds = self.thresholds[sl]
-        below = ((filtered[:, 1:] < thresholds)
-                 & (filtered[:, :-1] >= thresholds))
-        self._crossings[sl] = below
-        self._spikes_win[sl] = np.any(below, axis=1).astype(np.int16)
-        self._sbp_win[sl] = spike_band_power(filtered)
+    def _features_all(self):
+        filtered = self.filt_buffer
+        below = ((filtered[:, 1:] < self.thresholds)
+                 & (filtered[:, :-1] >= self.thresholds))
+        self._crossings[:, :] = below
+        self._spikes_win[:] = np.any(below, axis=1).astype(np.int16)
+        self._sbp_win[:] = spike_band_power(filtered)
 
     def _gpu_filter(self):
         torch = self._torch

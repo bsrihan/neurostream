@@ -110,8 +110,6 @@ with OptimizedProcessor(
         thresholds=thresholds,
         reref_groups=reref_groups,
         sample_rate=sample_rate,
-        per_array_threads=True,
-        per_channel_threads=True,
         use_gpu="auto",
         decimate=False,
 ) as processor:
@@ -125,8 +123,8 @@ Run that from `notebooks/`, which is also where `baseline.ipynb` imports it.
 
 ### Lossless
 
-- **One thread per array.** Each re-referencing group is a multi-electrode array. Weights do not cross groups, so each group is re-referenced on its own thread. If a weight matrix does mix groups, those channels stay in one thread so the result does not change.
-- **Filtering and feature extraction across channels.** After re-referencing, channels are independent. Each channel is its own task. The pool size defaults to the number of CPUs so a 1 ms frame stays inside the real-time budget; pass `channel_workers=n_channels` for one thread per channel.
+- **Block re-reference.** Each multi-electrode array keeps a cached `(I - P)` for its own channels. The full channel-by-channel matrix is not rebuilt every millisecond. If a weight matrix does mix groups, those channels stay one block so the result does not change.
+- **Reverse FIR as one multiply.** The forward filter is still the Butterworth IIR. The reverse FIR then runs as a single multiply across every channel. A thread pool around each 1 ms frame was slower than the baseline loop, so the CPU path does not start one. `per_array_threads` and `per_channel_threads` are still accepted and do not change that path.
 - **GPU filtering, preferring unified memory.** Install PyTorch to enable it. `use_gpu="auto"` selects Apple MPS first, then an integrated CUDA GPU, then a discrete CUDA GPU. MPS and integrated GPUs share memory with the CPU, which is the case the design notes call out. The IIR filter is parallel across channels. With no GPU, or without PyTorch, filtering stays on the CPU and matches the baseline loop. CUDA runs the same recurrence in float64. MPS has no float64, so those results can differ in the last bits.
 - **Sparse spikes.** `spike_events` is a `(channel, millisecond)` list and `spikes_sparse` is the CSR matrix of the dense raster. Most bins are zero, so this is the form to store or send. Building that list is extra work on the real-time path; leave `store_dense_spikes=True` (the default) when the next step wants the raster in memory. `crossing_events` keeps every sample-level threshold crossing.
 
