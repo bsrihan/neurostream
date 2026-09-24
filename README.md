@@ -99,7 +99,7 @@ Spike-band power is an alternative to threshold crossings that is meant to captu
 
 ## Optimizations
 
-These are implemented in [`notebooks/optimizations.py`](./notebooks/optimizations.py) and used by the processing loop in [`baseline.ipynb`](./notebooks/baseline.ipynb). Lossless options reproduce the baseline spikes and spike-band power. Decimation is off unless you ask for it, because it changes the waveforms.
+These are implemented in [`notebooks/optimizations.py`](./notebooks/optimizations.py) and used by the processing loop in [`baseline.ipynb`](./notebooks/baseline.ipynb). Lossless options reproduce the baseline spikes and spike-band power. Decimation is off unless you ask for it, because it changes the waveforms. Before-and-after numbers are in [`notebooks/09-21_optimizations.ipynb`](./notebooks/09-21_optimizations.ipynb).
 
 ```python
 from optimizations import OptimizedProcessor
