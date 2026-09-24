@@ -1,0 +1,28 @@
+# Minimal, platform-independent environment for neurostream.
+#
+# Use this file on macOS, or anywhere an exact lockfile is not required:
+#
+#     conda env create -f environment.min.yml
+#     conda activate neurostream
+#
+# environment.yml is an exact `conda env export` from a Linux machine. It pins
+# ld_impl_linux-64, libgcc-ng and libstdcxx-ng, so it cannot solve on macOS
+# even though the README lists macOS as supported. Prefer it only when
+# reproducing that exact Linux environment.
+#
+# Dev tooling for `make format` (autoflake, isort, yapf) is not included here;
+# see requirements.txt.
+name: neurostream
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.13
+  - ipykernel
+  - jupyterlab
+  - joblib
+  - matplotlib
+  - numba
+  - numpy
+  - scipy
+  - pip
