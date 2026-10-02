@@ -6,17 +6,23 @@ import scipy.signal
 
 
 def get_filter_func(causal=False, use_fir=True):
-    """
-    Get a function for filtering the data
+    """Return the baseline millisecond filter.
+
+    The forward pass is a Butterworth second-order-section filter
+    (``scipy.signal.sosfilt``), causal in time, with delay state carried
+    from one millisecond to the next. When ``causal`` is false, a reverse
+    pass cancels that phase. ``use_fir`` selects the reverse pass used by
+    the notebook: the impulse response of the same Butterworth, applied as
+    a valid convolution over the 4 ms look-back. The other reverse pass is
+    a second IIR run on the time-reversed buffer.
 
     Parameters
     ----------
-    demean : bool
-        Whether to apply a common average reference before filtering
     causal : bool
-        Whether to use causal filtering or acausal filtering
+        When true, return only the forward IIR. When false, return the
+        forward-then-reverse filter.
     use_fir : bool
-        Whether to use an FIR filter for the reverse filter (when causal=False)
+        When true and ``causal`` is false, the reverse pass is an FIR.
     """
 
     def causal_filter(data, filt_data, sos, zi):
@@ -103,27 +109,37 @@ def build_filter(but_order=4,
                  acausal_filter_lag=120,
                  fs=30000,
                  n_channels=64):
-    """
-    Build a filter
+    """Design the spike-band filter and its per-channel delay state.
+
+    Default band is 250-5000 Hz, Butterworth order 4, at ``fs`` samples
+    per second. That is the spike band used for threshold crossings
+    (Masse et al., 2014, J. Neural Eng.) and for spike-band power
+    (Nason et al., 2020, J. Neural Eng.). Both cutoffs set a band-pass.
+    One cutoff sets a high-pass or a low-pass.
+
+    The forward filter is always an IIR in second-order sections. Its
+    initial state is ``sosfilt_zi`` copied onto every channel, which is
+    the steady state for a constant input of 1, not a zero buffer.
+    Acausal mode also builds the reverse FIR: the response of that IIR
+    to an impulse ``acausal_filter_lag + 1`` samples long. At 30 kHz a
+    lag of 120 samples is 4 ms of look-back.
 
     Parameters
     ----------
     but_order : int
-        Order of the Butterworth filter
-    but_low : float
-        Low frequency cutoff
-    but_high : float
-        High frequency cutoff
+        Butterworth order.
+    but_low, but_high : float
+        Cutoffs in Hz. Zero or None drops that edge.
     acausal_filter_type : str
-        Type of acausal filter to use
+        ``"fir"`` (notebook default) or anything else for an IIR reverse pass.
     causal : bool
-        Whether to use causal filtering
+        Skip the reverse pass when true.
     acausal_filter_lag : int
-        Lag of the acausal filter
+        Reverse-filter length, in samples, minus one.
     fs : float
-        Sampling frequency
+        Sampling rate in Hz.
     n_channels : int
-        Number of channels
+        How many copies of the delay state to allocate.
     """
     # determine filter type
     if but_low and but_high:
@@ -194,6 +210,15 @@ def build_filter(but_order=4,
 
 
 def rereference_data(data, reref_params):
+    """Re-reference one window.
+
+    ``reref_params`` is ``P`` in the mixing ``y = (I - P) x``. A common
+    average puts ``1 / n`` in every entry of a group's block. A linear
+    regression reference puts the fitted weights there instead. Channels
+    outside a group stay zero in ``P``, so they are not mixed. ``data``
+    is shaped ``(n_channels, n_samples)`` and is in the same units as the
+    recording (microvolts, for an NSX file).
+    """
     data = np.ascontiguousarray(data)
     reref_mat = np.eye(reref_params.shape[0]) - reref_params
     reref_data = reref_mat @ data

@@ -19,6 +19,7 @@ from optimizations import (  # noqa: E402
     spikes_to_sparse,
     threshold_crossings,
 )
+from x86_forward import cpu_supports_avx512, try_create_forward  # noqa: E402
 from utils import build_filter, rereference_data  # noqa: E402
 
 
@@ -115,6 +116,49 @@ class OptimizationsTest(unittest.TestCase):
                                    rtol=1e-5,
                                    atol=1e-5,
                                    equal_nan=True)
+
+    def test_avx512_forward_matches_scipy_stored_values(self):
+        if not cpu_supports_avx512():
+            self.skipTest("CPU has no AVX-512")
+        rng = np.random.default_rng(11)
+        sos = scipy.signal.butter(4, [250, 5000], btype="bandpass",
+                                  output="sos", fs=30000)
+        n_channels, n_samples, n_windows = 17, 30, 12
+        zi_flat = scipy.signal.sosfilt_zi(sos)
+        zi = np.zeros((zi_flat.shape[0], n_channels, zi_flat.shape[1]))
+        zi[:, :, :] = zi_flat[:, None, :]
+        forward = try_create_forward(sos, zi, n_samples)
+        self.assertIsNotNone(forward)
+        stream = rng.normal(size=(n_channels, n_samples * n_windows))
+        got = np.empty_like(stream, dtype=np.float32)
+        expected = np.empty_like(got)
+        for index in range(n_windows):
+            start = index * n_samples
+            chunk = stream[:, start:start + n_samples]
+            y, zi = scipy.signal.sosfilt(sos, chunk, axis=1, zi=zi)
+            expected[:, start:start + n_samples] = y
+            forward.apply(chunk, got[:, start:start + n_samples])
+        np.testing.assert_array_equal(got, expected)
+
+    def test_x86_forward_matches_scipy_forward_on_the_processor(self):
+        raw, params, thresholds, groups = self._recording(n_windows=10)
+        kwargs = dict(n_channels=raw.shape[0],
+                      reref_params=params,
+                      thresholds=thresholds,
+                      reref_groups=groups,
+                      use_gpu=False,
+                      decimate=False)
+        with OptimizedProcessor(use_x86=False, **kwargs) as scipy_proc:
+            self.assertEqual(scipy_proc.forward_impl, "scipy")
+            scipy_result = scipy_proc.process_recording(raw)
+        with OptimizedProcessor(use_x86=True, **kwargs) as x86_proc:
+            if cpu_supports_avx512():
+                self.assertEqual(x86_proc.forward_impl, "avx512")
+            x86_result = x86_proc.process_recording(raw)
+        np.testing.assert_array_equal(x86_result.filtered, scipy_result.filtered)
+        np.testing.assert_array_equal(x86_result.spikes, scipy_result.spikes)
+        np.testing.assert_array_equal(x86_result.spike_band_power,
+                                      scipy_result.spike_band_power)
 
     def test_serial_matches_notebook_loop(self):
         result, reference = self._run(per_array_threads=False,

@@ -1,8 +1,22 @@
 #! /usr/bin/env python
-"""
-Takes data from an NSX file and computes voltage thresholds
-and spike rate normalization parameters,
-then stores both in a JSON file
+"""Estimate thresholds and re-reference weights from an NSX recording.
+
+Methods, following the preprocessing sections of Masse et al. (2014,
+J. Neural Eng.) and the brand-nsp threshold node this repo cites:
+
+- Optionally band-pass the same 250-5000 Hz spike band the online
+  filter uses, then take each channel's root-mean-square voltage.
+- The threshold is ``thresh_mult`` times that RMS, default ``-4.5``.
+  A channel that does not vary is given a threshold of ``-1e6`` so it
+  never crosses.
+- Re-reference weights are either a common average inside each
+  electrode group or a linear-regression reference (one row of weights
+  per channel, fit inside its group). ``-d`` limits the fit to the
+  first N seconds so a long file is not loaded twice.
+
+The JSON written here is what ``baseline.ipynb`` reads. It is not the
+online path: ``optimizations.py`` applies these weights every
+millisecond, it does not reestimate them.
 
 Usage:
     python calc_params.py -f file.nsx

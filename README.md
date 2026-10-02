@@ -75,7 +75,9 @@ one millisecond at a time, and plots spikes and spike-band power.
 
 ## Signal Processing
 
-This section summarizes the standard signal processing steps used on data from microelectrode arrays. For a code example, see [baseline.ipynb](./notebooks/baseline.ipynb).
+This section is written the way a methods paragraph is written in Journal of Neural Engineering and Journal of Neuroscience Methods: each step names the quantity, the parameters, and the reference implementation it matches. IEEE Transactions on Neural Systems and Rehabilitation Engineering is the model for the latency numbers (a named computer, wall time per second of data, separate from whether the spikes match). Frontiers in Neuroinformatics is the model for saying which options reproduce a reference pipeline and which options change the signal.
+
+For a code example, see [baseline.ipynb](./notebooks/baseline.ipynb). Before-and-after timings, including the steady-state split, are in [notebooks/09-21_optimizations.ipynb](./notebooks/09-21_optimizations.ipynb).
 
 ### Re-referencing
 
@@ -124,7 +126,8 @@ Run that from `notebooks/`, which is also where `baseline.ipynb` imports it.
 ### Lossless
 
 - **Block re-reference.** Each multi-electrode array keeps a cached `(I - P)` for its own channels. The full channel-by-channel matrix is not rebuilt every millisecond. If a weight matrix does mix groups, those channels stay one block so the result does not change.
-- **Reverse FIR as one multiply.** The forward filter is still the Butterworth IIR. The reverse FIR then runs as a single multiply across every channel. A thread pool around each 1 ms frame was slower than the baseline loop, so the CPU path does not start one. `per_array_threads` and `per_channel_threads` are still accepted and do not change that path.
+- **Forward filter on AVX-512.** The forward Butterworth is the direct-form-II-transposed cascade already used by SciPy. On an x86-64 CPU with AVX-512 the channel axis is compiled into 512-bit registers (`forward_impl="avx512"`). The loop is single-threaded. A parallel compile of this stage shares a thread pool with the reverse multiply and slows that multiply down, so it is not used. CPUs without AVX-512, and `use_x86=False`, keep `scipy.signal.sosfilt`. On the 4-core Xeon guest in the notebook (AVX-512, KVM), a processor that has already been built finishes 1024 channels in 738 ms of wall time per second of data. 2048 channels takes 1469 ms. Before this change the forward filter was the largest stage at both sizes, on every repeat. After it, the reverse multiply is the largest stage, and that stage was left as it was.
+- **Reverse FIR as one multiply.** The reverse FIR runs as a single multiply across every channel. A thread pool around each 1 ms frame was slower than the baseline loop, so the CPU path does not start one. `per_array_threads` and `per_channel_threads` are still accepted and do not change that path.
 - **GPU filtering, preferring unified memory.** Install PyTorch to enable it. `use_gpu="auto"` selects Apple MPS first, then an integrated CUDA GPU, then a discrete CUDA GPU. MPS and integrated GPUs share memory with the CPU, which is the case the design notes call out. The IIR filter is parallel across channels. With no GPU, or without PyTorch, filtering stays on the CPU and matches the baseline loop. CUDA runs the same recurrence in float64. MPS has no float64, so those results can differ in the last bits.
 - **Sparse spikes.** `spike_events` is a `(channel, millisecond)` list and `spikes_sparse` is the CSR matrix of the dense raster. Most bins are zero, so this is the form to store or send. Building that list is extra work on the real-time path; leave `store_dense_spikes=True` (the default) when the next step wants the raster in memory. `crossing_events` keeps every sample-level threshold crossing.
 

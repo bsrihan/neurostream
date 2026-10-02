@@ -5,9 +5,14 @@ Lossless (same spikes and spike-band power as ``baseline.ipynb``):
 - Re-reference each multi-electrode array with a cached ``(I - P)`` block.
   Arrays do not share weights, so the full channel-by-channel matrix is never
   formed.
+- Run the forward Butterworth as a direct-form-II-transposed cascade. On an
+  AVX-512 x86-64 CPU that cascade is compiled with the channel axis contiguous,
+  eight channels per register. Other CPUs keep ``scipy.signal.sosfilt``.
 - Run the acausal reverse FIR as one matrix multiply across every channel.
   A per-millisecond thread pool was slower than the baseline loop, so the CPU
-  path does not use one.
+  path does not use one. The forward filter stays single-threaded for the
+  same reason: a parallel compiled loop shares its threads with this multiply
+  and makes the multiply slower.
 - Optional GPU filtering. Apple MPS is preferred, then an integrated CUDA GPU,
   then a discrete CUDA GPU. Those first two share memory with the CPU, so the
   2048-channel buffer does not have to be copied across a bus.
@@ -400,10 +405,14 @@ class OptimizedProcessor:
 
     Call ``process_window`` once per millisecond, or ``process_recording`` on
     an array shaped ``(n_channels, n_samples)``. Each re-referencing group is
-    applied with a cached block matrix, and the acausal reverse FIR is one
-    multiply across channels. Set ``use_gpu="auto"`` to filter on MPS or CUDA
-    when a device is present, ``device`` to force one (including ``"cpu"``),
-    and ``decimate=True`` for the lossy 15 kHz path.
+    applied with a cached block matrix. The forward Butterworth is
+    ``scipy.signal.sosfilt``, or an AVX-512 compile of the same recurrence
+    when this CPU has those registers (``forward_impl`` is ``"avx512"`` or
+    ``"scipy"``). The acausal reverse FIR is one multiply across channels.
+    Set ``use_gpu="auto"`` to filter on MPS or CUDA when a device is present,
+    ``device`` to force one (including ``"cpu"``), and ``decimate=True`` for
+    the lossy 15 kHz path. ``use_x86=False`` keeps the SciPy forward filter
+    on a machine that could compile it.
 
     ``per_array_threads`` and ``per_channel_threads`` are accepted so existing
     callers keep working. A thread pool around a 1 ms frame was slower than
@@ -431,7 +440,8 @@ class OptimizedProcessor:
                  use_gpu="auto",
                  device=None,
                  decimate=False,
-                 store_dense_spikes=True):
+                 store_dense_spikes=True,
+                 use_x86=True):
         self.n_channels = int(n_channels)
         if self.n_channels < 1:
             raise ValueError("n_channels must be positive")
@@ -544,11 +554,22 @@ class OptimizedProcessor:
                                               self.samples_per_window)
             self._leading_nans = self.rev_buffer.shape[1]
 
+        self.use_x86 = bool(use_x86)
+        self.forward_impl = "scipy"
+        self._x86_forward = None
+        if self.use_x86 and not self.use_gpu:
+            from x86_forward import try_create_forward
+            self._x86_forward = try_create_forward(
+                self.sos, self.zi, self.samples_per_window)
+            if self._x86_forward is not None:
+                self.forward_impl = "avx512"
+
         self._closed = False
         logger.info(
-            "processor arrays=%d fast_fir=%s gpu=%s decimate=%s",
+            "processor arrays=%d fast_fir=%s forward=%s gpu=%s decimate=%s",
             len(self.groups),
             self._use_fast_fir,
+            self.forward_impl,
             self.gpu_device if self.use_gpu else "off",
             self.decimate,
         )
@@ -755,6 +776,11 @@ class OptimizedProcessor:
             out[index] = mat @ np.ascontiguousarray(raw[index])
 
     def _forward_sos(self, data, dest):
+        # AVX-512 path keeps its own delay state. SciPy's zi is the
+        # fallback, updated in place so the next window continues.
+        if self._x86_forward is not None:
+            self._x86_forward.apply(data, dest)
+            return
         dest[:, :], self.zi[:, :] = scipy.signal.sosfilt(self.sos,
                                                          data,
                                                          axis=1,
