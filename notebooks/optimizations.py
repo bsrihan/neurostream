@@ -26,8 +26,9 @@ What changed, in plain language:
 every other sample, so 30 kHz becomes 15 kHz. Spike frames stay at one
 per millisecond. The waveforms change, so this is off by default.
 
-The timing notebook builds a synthetic recording. It does not read the
-example ``.ns6`` file.
+The timing notebook checks both paths on the real ``NSP1_aligned.ns6``
+recording (128 electrodes) and on a synthetic recording for the larger
+electrode counts.
 """
 
 from __future__ import annotations
