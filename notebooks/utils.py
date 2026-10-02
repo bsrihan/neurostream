@@ -6,15 +6,14 @@ import scipy.signal
 
 
 def get_filter_func(causal=False, use_fir=True):
-    """Return the baseline millisecond filter.
+    """Return the original millisecond filter from ``baseline.ipynb``.
 
-    The forward pass is a Butterworth second-order-section filter
-    (``scipy.signal.sosfilt``), causal in time, with delay state carried
-    from one millisecond to the next. When ``causal`` is false, a reverse
-    pass cancels that phase. ``use_fir`` selects the reverse pass used by
-    the notebook: the impulse response of the same Butterworth, applied as
-    a valid convolution over the 4 ms look-back. The other reverse pass is
-    a second IIR run on the time-reversed buffer.
+    The forward pass keeps 250-5000 Hz and remembers its state from one
+    millisecond to the next. When ``causal`` is false, a second pass runs
+    backward over a 4 ms buffer so the spike is not shifted in time.
+    ``use_fir`` selects that backward pass as a short convolution, which
+    is what the notebook uses. The other choice runs the same filter
+    backward instead.
 
     Parameters
     ----------
@@ -109,13 +108,12 @@ def build_filter(but_order=4,
                  acausal_filter_lag=120,
                  fs=30000,
                  n_channels=64):
-    """Design the spike-band filter and its per-channel delay state.
+    """Build the 250-5000 Hz spike filter and one copy of its memory per electrode.
 
     Default band is 250-5000 Hz, Butterworth order 4, at ``fs`` samples
-    per second. That is the spike band used for threshold crossings
-    (Masse et al., 2014, J. Neural Eng.) and for spike-band power
-    (Nason et al., 2020, J. Neural Eng.). Both cutoffs set a band-pass.
-    One cutoff sets a high-pass or a low-pass.
+    per second. That is the band used for spikes (Masse et al., 2014) and
+    for spike-band power (Nason et al., 2020). Both cutoffs make a
+    band-pass. One cutoff makes a high-pass or a low-pass.
 
     The forward filter is always an IIR in second-order sections. Its
     initial state is ``sosfilt_zi`` copied onto every channel, which is
@@ -210,14 +208,14 @@ def build_filter(but_order=4,
 
 
 def rereference_data(data, reref_params):
-    """Re-reference one window.
+    """Subtract the shared part of one window of voltage.
 
-    ``reref_params`` is ``P`` in the mixing ``y = (I - P) x``. A common
-    average puts ``1 / n`` in every entry of a group's block. A linear
-    regression reference puts the fitted weights there instead. Channels
-    outside a group stay zero in ``P``, so they are not mixed. ``data``
-    is shaped ``(n_channels, n_samples)`` and is in the same units as the
-    recording (microvolts, for an NSX file).
+    ``reref_params`` is ``P`` in ``y = (I - P) x``. A common average puts
+    ``1 / n`` in every entry of a group's block, which subtracts the group
+    mean. A linear regression reference puts the fitted weights there
+    instead. Electrodes outside a group stay zero in ``P``, so they are
+    not mixed in. ``data`` is shaped ``(n_electrodes, n_samples)`` and uses
+    the same units as the recording (microvolts, for an NSX file).
     """
     data = np.ascontiguousarray(data)
     reref_mat = np.eye(reref_params.shape[0]) - reref_params

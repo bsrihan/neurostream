@@ -1,30 +1,33 @@
-"""Real-time pipeline optimizations for 30 kHz neural data.
+"""Faster version of the millisecond neural pipeline.
 
-Lossless (same spikes and spike-band power as ``baseline.ipynb``):
+Each electrode is sampled 30,000 times a second. This module turns one
+millisecond of voltage into a spike (yes or no) and one spike-band power
+number per electrode. The numbers match ``baseline.ipynb`` unless
+``decimate=True``.
 
-- Re-reference each multi-electrode array with a cached ``(I - P)`` block.
-  Arrays do not share weights, so the full channel-by-channel matrix is never
-  formed.
-- Run the forward Butterworth as a direct-form-II-transposed cascade. On an
-  AVX-512 x86-64 CPU that cascade is compiled with the channel axis contiguous,
-  eight channels per register. Other CPUs keep ``scipy.signal.sosfilt``.
-- Run the acausal reverse FIR as one matrix multiply across every channel.
-  A per-millisecond thread pool was slower than the baseline loop, so the CPU
-  path does not use one. The forward filter stays single-threaded for the
-  same reason: a parallel compiled loop shares its threads with this multiply
-  and makes the multiply slower.
-- Optional GPU filtering. Apple MPS is preferred, then an integrated CUDA GPU,
-  then a discrete CUDA GPU. Those first two share memory with the CPU, so the
-  2048-channel buffer does not have to be copied across a bus.
-- Spikes are returned as ``(channel, millisecond)`` events and as a CSR matrix,
-  which is the form to store or send. The dense raster is still available.
+What changed, in plain language:
 
-Lossy (opt in with ``decimate=True``):
+- Re-reference each group of electrodes with a small matrix that is built
+  once and reused. The mix is ``y = (I - P) x``: subtract the shared part
+  and keep the rest.
+- The forward half of the 250-5000 Hz filter is SciPy's usual Butterworth.
+  On an Intel or AMD CPU with AVX-512, eight electrodes are updated in one
+  instruction. Other CPUs stay on SciPy. The loop uses one thread, because
+  a many-thread version slowed the reverse-filter step that follows.
+- The backward half of the filter, which looks 4 ms ahead so the spike is
+  not shifted in time, is one multiply across all electrodes.
+- If PyTorch can see a GPU, filtering can run there. An Apple GPU or a GPU
+  that shares system memory is preferred, so the samples do not have to
+  cross a separate bus.
+- Spikes can be returned as a list of ``(electrode, millisecond)`` instead
+  of a grid that is almost all zeros.
 
-- Low-pass the raw signal, then keep every other sample (30 kHz -> 15 kHz).
-  The cutoff is 0.8 times the new Nyquist (6 kHz), so the spike band still
-  passes and energy that would alias is attenuated first. Feature frames stay
-  at 1 kHz.
+``decimate=True`` is optional and lossy. It low-pass filters, then keeps
+every other sample, so 30 kHz becomes 15 kHz. Spike frames stay at one
+per millisecond. The waveforms change, so this is off by default.
+
+The timing notebook builds a synthetic recording. It does not read the
+example ``.ns6`` file.
 """
 
 from __future__ import annotations
@@ -58,6 +61,13 @@ def _fir_band_matrix(rev_win, buffer_len, n_out):
 
 
 def _apply_fir(rev_buffer, rev_win, n_out, filt, band, leading_nans):
+    """Backward half of the filter, for every electrode at once.
+
+    After the 4 ms look-back buffer is full of real samples, this is one
+    matrix multiply. The first few milliseconds still use the original
+    per-electrode convolution. A multiply would treat the empty warmup
+    samples as poison and spread NaNs into the output.
+    """
     if leading_nans == 0:
         # One BLAS multiply across channels. Same values as np.convolve once
         # the NaN warmup prefix has shifted out; until then the direct sum
@@ -283,6 +293,11 @@ def _empty_like(tensor):
 
 
 def _channel_blocks(n_channels, n_workers):
+    """Split electrodes into contiguous slices, one slice per worker.
+
+    The CPU path does not process these slices on separate threads. A test
+    checks that asking for one worker per electrode builds one slice each.
+    """
     n_workers = max(1, min(int(n_workers), int(n_channels)))
     edges = np.linspace(0, n_channels, n_workers + 1, dtype=int)
     return [
@@ -329,6 +344,11 @@ def _reref_plan(groups, reref_params):
 
 
 def _normalize_groups(n_channels, reref_groups):
+    """Make sure every electrode is in exactly one re-reference group.
+
+    A missing group list means one group of all electrodes. Electrodes the
+    caller left out are added as their own group. Overlapping groups raise.
+    """
     if reref_groups is None:
         return [list(range(n_channels))]
     groups = []
@@ -401,18 +421,17 @@ class RecordingResult:
 
 
 class OptimizedProcessor:
-    """Stream 30 kHz neural data with the README optimizations turned on.
+    """Run the pipeline on 30 kHz data, one millisecond at a time.
 
-    Call ``process_window`` once per millisecond, or ``process_recording`` on
-    an array shaped ``(n_channels, n_samples)``. Each re-referencing group is
-    applied with a cached block matrix. The forward Butterworth is
-    ``scipy.signal.sosfilt``, or an AVX-512 compile of the same recurrence
-    when this CPU has those registers (``forward_impl`` is ``"avx512"`` or
-    ``"scipy"``). The acausal reverse FIR is one multiply across channels.
-    Set ``use_gpu="auto"`` to filter on MPS or CUDA when a device is present,
-    ``device`` to force one (including ``"cpu"``), and ``decimate=True`` for
-    the lossy 15 kHz path. ``use_x86=False`` keeps the SciPy forward filter
-    on a machine that could compile it.
+    ``process_window`` takes one millisecond, shape
+    ``(n_electrodes, samples_in_that_millisecond)``. ``process_recording``
+    walks a whole array the same way. Each electrode group is re-referenced
+    with a matrix built once. The forward filter is SciPy, or the AVX-512
+    version of the same math when this CPU supports it (``forward_impl`` is
+    ``"avx512"`` or ``"scipy"``). The backward filter is one multiply.
+    ``use_gpu="auto"`` uses a GPU when PyTorch can see one. ``decimate=True``
+    drops every other sample after a low-pass and changes the waveforms.
+    ``use_x86=False`` keeps the SciPy forward filter even on an AVX-512 CPU.
 
     ``per_array_threads`` and ``per_channel_threads`` are accepted so existing
     callers keep working. A thread pool around a 1 ms frame was slower than
@@ -868,6 +887,7 @@ def _fir_reverse_torch(rev_buffer, rev_win):
 
 
 def _events_to_sparse(events, n_channels, n_windows):
+    """Compressed matrix of the same spikes as the ``(electrode, millisecond)`` list."""
     if events.size == 0:
         return scipy.sparse.csr_matrix((n_channels, n_windows), dtype=np.int16)
     values = np.ones(events.shape[0], dtype=np.int16)

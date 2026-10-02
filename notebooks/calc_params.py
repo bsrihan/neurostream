@@ -1,22 +1,21 @@
 #! /usr/bin/env python
-"""Estimate thresholds and re-reference weights from an NSX recording.
+"""Estimate thresholds and re-reference weights from a real NSX recording.
 
-Methods, following the preprocessing sections of Masse et al. (2014,
-J. Neural Eng.) and the brand-nsp threshold node this repo cites:
+This is the offline setup step, not the millisecond loop. It reads a
+Blackrock ``.ns6`` file and writes a JSON file that ``baseline.ipynb``
+loads. The online processor applies those saved numbers. It does not
+recompute them.
 
-- Optionally band-pass the same 250-5000 Hz spike band the online
-  filter uses, then take each channel's root-mean-square voltage.
-- The threshold is ``thresh_mult`` times that RMS, default ``-4.5``.
-  A channel that does not vary is given a threshold of ``-1e6`` so it
-  never crosses.
-- Re-reference weights are either a common average inside each
-  electrode group or a linear-regression reference (one row of weights
-  per channel, fit inside its group). ``-d`` limits the fit to the
-  first N seconds so a long file is not loaded twice.
+What it estimates:
 
-The JSON written here is what ``baseline.ipynb`` reads. It is not the
-online path: ``optimizations.py`` applies these weights every
-millisecond, it does not reestimate them.
+- Noise on each electrode, after an optional 250-5000 Hz filter. The
+  threshold is a multiple of that root-mean-square voltage. The usual
+  multiple is ``-4.5``. An electrode that never varies gets a threshold
+  of ``-1e6`` so it never counts as a spike.
+- Re-reference weights. A common average uses an equal mix inside each
+  electrode group. A linear regression reference fits a mix for each
+  electrode from the others in its group. ``-d 60`` uses only the first
+  60 seconds, so a long file is not loaded twice.
 
 Usage:
     python calc_params.py -f file.nsx
@@ -45,17 +44,11 @@ from utils import plot_txpanel
 
 
 def common_average_reference(data, group_list):
-    """
-    common average reference by group
-    
-    Parameters
-    ----------
-    data : array_like
-        An 2-dimensional input array with shape
-        [channel x time]
-    group_list : list
-        List of lists of channels grouped together across
-        which to compute a common average reference
+    """Subtract each group's average from every electrode in that group.
+
+    Electrodes in a group often hear the same noise. Removing the average
+    leaves the part that differed across electrodes. ``data`` is shaped
+    ``(electrodes, time)`` and is modified in place.
     """
     for g in group_list:
         data[g, :] -= data[g, :].mean(axis=0, keepdims=True)
@@ -435,6 +428,12 @@ logging.debug('Finished filtering')
 
 @numba.jit('float64[:,:](float64[:,:], float64[:,:])', nopython=True)
 def rereference_data(data, reref_params):
+    """Apply ``y = (I - P) x`` for one window.
+
+    ``P`` holds the re-reference weights. Same mix as
+    ``utils.rereference_data``. This copy is compiled with numba because
+    ``calc_params.py`` calls it while fitting weights.
+    """
     data = np.ascontiguousarray(data)
     reref_mat = np.eye(reref_params.shape[0]) - reref_params
     reref_data = reref_mat @ data

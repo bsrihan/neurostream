@@ -1,27 +1,24 @@
-"""Forward spike-band filter compiled for x86-64 AVX-512.
+"""Forward half of the spike-band filter, sped up on AVX-512 CPUs.
 
-Journal of Neuroscience Methods papers give the update, not only the
-library call. This is that update for the forward half of the
-zero-phase spike-band filter (direct form II transposed, one
-second-order section at a time)::
+The filter walks forward in time. Each new sample depends on the one
+before it, so doing one electrode faster does not help much. Electrodes
+do not depend on each other, so the loop lines them up and updates eight
+at once. That is what an AVX-512 register holds for 64-bit values.
+
+The arithmetic is the same update SciPy uses, one filter section at a
+time::
 
     y[n] = b0 * x[n] + z1
     z1   = b1 * x[n] - a1 * y[n] + z2
     z2   = b2 * x[n] - a2 * y[n]
 
-Time is a recurrence, so a wider SIMD register does not shorten one
-channel. The channels are independent, and the compiled loop keeps
-them contiguous so an AVX-512 register holds eight channels at once.
-Coefficients stay float64. The result is stored the same way SciPy's
-``sosfilt`` is stored (float64 arithmetic, then the caller's dtype).
+Math is float64. The result is then stored in whatever dtype the caller
+asked for, which is float32 in the streaming buffer. That matches
+``scipy.signal.sosfilt`` followed by a cast.
 
-A parallel OpenMP loop is not used. On this processor the reverse
-filter is an OpenBLAS multiply, and the two libraries share one
-thread pool. Running them in the same process made the multiply
-slower. The compiled loop is single-threaded and uses the wide
-registers instead.
-
-Machines without AVX-512 keep ``scipy.signal.sosfilt``.
+The loop stays on one thread. A many-thread version shares its threads
+with the matrix multiply that does the backward half of the filter, and
+that multiply got much slower. CPUs without AVX-512 keep SciPy.
 """
 
 from __future__ import annotations

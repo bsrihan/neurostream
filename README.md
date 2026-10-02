@@ -37,7 +37,9 @@ fails with `NoSuchKernel: neurostream`.
 
 This writes `data/NSP1_aligned.ns6` (~706 MiB), which is git-ignored. The file
 holds 128 channels sampled at 30 kHz for about 96 seconds; the 1024 electrodes
-in the dataset name are split across several NSPs.
+in the dataset name are split across several NSPs. `baseline.ipynb` is the
+notebook that reads this file. The timing notebook does not. See "Which
+recording the numbers used" below.
 
 ### 3. Compute thresholds and re-referencing parameters
 
@@ -73,11 +75,24 @@ jupyter lab baseline.ipynb
 The notebook reads the recording and the JSON from step 3, processes the data
 one millisecond at a time, and plots spikes and spike-band power.
 
+## What this does
+
+A channel is one electrode. Each electrode is sampled 30,000 times a second (30 kHz). The job is to take one millisecond of those voltages and return two things for every electrode: whether a spike happened, and one number for how strong the spike-band activity was.
+
+Real time means the computer finishes that millisecond before the next one arrives. Over a full second of data, that is under 1000 ms of clock time.
+
+The steps, in order:
+
+1. **Re-reference.** Many electrodes pick up the same noise. Subtract a shared estimate so what is left is more local to each electrode. A common average subtracts the group's mean. A linear regression reference subtracts a fitted mix of the other electrodes in the group.
+2. **Filter.** Keep 250–5000 Hz, the band where spikes show up. The filter looks 4 ms ahead so it does not slide the spike later in time.
+3. **Threshold crossing.** If the filtered voltage falls through that electrode's threshold during the millisecond, count one spike. Extra crossings in the same millisecond do not add more spikes.
+4. **Spike-band power.** Square the filtered voltage, take ten times the log, and average over the millisecond. This tracks similar activity without using a threshold.
+
+[baseline.ipynb](./notebooks/baseline.ipynb) runs these steps on the example recording. [notebooks/09-21_optimizations.ipynb](./notebooks/09-21_optimizations.ipynb) times the fast version of the same steps.
+
+The paragraphs below are the same steps with the usual names and the papers they come from.
+
 ## Signal Processing
-
-This section is written the way a methods paragraph is written in Journal of Neural Engineering and Journal of Neuroscience Methods: each step names the quantity, the parameters, and the reference implementation it matches. IEEE Transactions on Neural Systems and Rehabilitation Engineering is the model for the latency numbers (a named computer, wall time per second of data, separate from whether the spikes match). Frontiers in Neuroinformatics is the model for saying which options reproduce a reference pipeline and which options change the signal.
-
-For a code example, see [baseline.ipynb](./notebooks/baseline.ipynb). Before-and-after timings, including the steady-state split, are in [notebooks/09-21_optimizations.ipynb](./notebooks/09-21_optimizations.ipynb).
 
 ### Re-referencing
 
@@ -125,12 +140,22 @@ Run that from `notebooks/`, which is also where `baseline.ipynb` imports it.
 
 ### Lossless
 
-- **Block re-reference.** Each multi-electrode array keeps a cached `(I - P)` for its own channels. The full channel-by-channel matrix is not rebuilt every millisecond. If a weight matrix does mix groups, those channels stay one block so the result does not change.
-- **Forward filter on AVX-512.** The forward Butterworth is the direct-form-II-transposed cascade already used by SciPy. On an x86-64 CPU with AVX-512 the channel axis is compiled into 512-bit registers (`forward_impl="avx512"`). The loop is single-threaded. A parallel compile of this stage shares a thread pool with the reverse multiply and slows that multiply down, so it is not used. CPUs without AVX-512, and `use_x86=False`, keep `scipy.signal.sosfilt`. On the 4-core Xeon guest in the notebook (AVX-512, KVM), a processor that has already been built finishes 1024 channels in 738 ms of wall time per second of data. 2048 channels takes 1469 ms. Before this change the forward filter was the largest stage at both sizes, on every repeat. After it, the reverse multiply is the largest stage, and that stage was left as it was.
-- **Reverse FIR as one multiply.** The reverse FIR runs as a single multiply across every channel. A thread pool around each 1 ms frame was slower than the baseline loop, so the CPU path does not start one. `per_array_threads` and `per_channel_threads` are still accepted and do not change that path.
-- **GPU filtering, preferring unified memory.** Install PyTorch to enable it. `use_gpu="auto"` selects Apple MPS first, then an integrated CUDA GPU, then a discrete CUDA GPU. MPS and integrated GPUs share memory with the CPU, which is the case the design notes call out. The IIR filter is parallel across channels. With no GPU, or without PyTorch, filtering stays on the CPU and matches the baseline loop. CUDA runs the same recurrence in float64. MPS has no float64, so those results can differ in the last bits.
-- **Sparse spikes.** `spike_events` is a `(channel, millisecond)` list and `spikes_sparse` is the CSR matrix of the dense raster. Most bins are zero, so this is the form to store or send. Building that list is extra work on the real-time path; leave `store_dense_spikes=True` (the default) when the next step wants the raster in memory. `crossing_events` keeps every sample-level threshold crossing.
+These keep the same spikes and the same spike-band power as the original loop.
+
+- **Block re-reference.** Each array of electrodes keeps a small mixing matrix and reuses it every millisecond. The code does not rebuild a giant matrix of every electrode against every other electrode. If a weight really does mix two arrays, those electrodes stay one block so the result does not change.
+- **Faster forward filter on this kind of CPU.** The forward half of the filter is the same Butterworth SciPy uses. On an Intel/AMD CPU with AVX-512, eight electrodes are filtered in one instruction. The loop uses one thread. Running it on many threads at once slowed the reverse-filter step that comes next, so that version was dropped. Other CPUs, and `use_x86=False`, keep SciPy. On the 4-core Xeon used for the notebook, a processor that is already built finishes 1024 channels in 738 ms per second of data. 2048 channels takes 1469 ms. The forward filter was the slowest stage before this change. After it, the reverse filter is the slowest stage, and that stage was left alone.
+- **Reverse filter as one multiply.** The backward half of the filter used to be a Python loop, one electrode at a time. It is now one multiply across all electrodes. A thread pool around each millisecond was slower than the original loop, so the CPU path does not start one. `per_array_threads` and `per_channel_threads` are still accepted and do not change that path.
+- **GPU, when the machine has one.** Install PyTorch to enable it. `use_gpu="auto"` picks an Apple GPU first, then a GPU that shares the computer's memory, then a separate NVIDIA GPU. Shared memory matters because copying 2048 channels across a bus can cost more than the filter. With no GPU, filtering stays on the CPU and matches the original loop. An Apple GPU uses 32-bit numbers, so the last bits can differ.
+- **Spikes stored without the zeros.** Most milliseconds have no spike. `spike_events` is a list of `(electrode, millisecond)` for the bins that fired. `spikes_sparse` is the same list in a compressed matrix. The full grid is still available. `crossing_events` keeps every sample that crossed threshold, not just one per millisecond.
 
 ### Lossy
 
-- **Decimate 30 kHz to 15 kHz.** `decimate=True` runs a causal order-8 Butterworth low-pass at 6 kHz (0.8 times the new 7.5 kHz Nyquist), then keeps every other sample. The spike band (250-5000 Hz) still passes, and energy that would alias is attenuated before the drop. Feature frames stay at 1 kHz. The acausal lag stays 4 ms, which is 60 samples at 15 kHz. Thresholds are still applied in volts; they were usually estimated at the original rate.
+- **Keep every other sample.** `decimate=True` low-pass filters at 6 kHz, then drops every other sample, so 30 kHz becomes 15 kHz. The spike band still gets through. Energy that would fold into that band is reduced first. Spike and power frames stay at one per millisecond. This changes the waveforms, so it is off unless you ask for it.
+
+## Which recording the numbers used
+
+The timings in [notebooks/09-21_optimizations.ipynb](./notebooks/09-21_optimizations.ipynb) did not use `data/NSP1_aligned.ns6`.
+
+That `.ns6` file is a real Blackrock recording: 128 electrodes, 30 kHz, about 96 seconds, about 706 MB. It is not stored in git. It was not downloaded for the timing notebook, and the threshold file that goes with it was not built either. `baseline.ipynb` is the notebook that reads it, after the download and `calc_params.py` steps above.
+
+The timing notebook builds its own recording in memory. Each group of 64 electrodes is noise, plus a short negative pulse every 10 ms on one electrode. The old loop and the fast processor see the same samples. A difference of 0 means the fast code matches the old code on that recording. It does not mean the code was checked on the real `.ns6` file. The example file is also only 128 electrodes, so it cannot stand in for the 1024- and 2048-electrode timing rows.
