@@ -143,7 +143,7 @@ Run that from `notebooks/`, which is also where `baseline.ipynb` imports it.
 These keep the same spikes and the same spike-band power as the original loop.
 
 - **Block re-reference.** Each array of electrodes keeps a small mixing matrix and reuses it every millisecond. The code does not rebuild a giant matrix of every electrode against every other electrode. If a weight really does mix two arrays, those electrodes stay one block so the result does not change.
-- **Faster forward filter on this kind of CPU.** The forward half of the filter is the same Butterworth SciPy uses. On an Intel/AMD CPU with AVX-512, eight electrodes are filtered in one instruction. The loop uses one thread. Running it on many threads at once slowed the reverse-filter step that comes next, so that version was dropped. Other CPUs, and `use_x86=False`, keep SciPy. On the 4-core Xeon used for the notebook, a processor that is already built finishes 1024 channels in 738 ms per second of data. 2048 channels takes about 1.4 s. On the real recording tiled to those sizes the numbers are 713 ms and 1469 ms. The forward filter was the slowest stage before this change. After it, the reverse filter is the slowest stage, and that stage was left alone.
+- **Faster forward filter on this kind of CPU.** The forward half of the filter is the same Butterworth SciPy uses. On an Intel/AMD CPU with AVX-512, eight electrodes are filtered in one instruction. The loop uses one thread. Running it on many threads at once slowed the reverse-filter step that comes next, so that version was dropped. Other CPUs, and `use_x86=False`, keep SciPy. On the 4-core Xeon used for the notebook, a processor that is already built finishes 1024 channels in 579 ms per second of data. 2048 channels takes about 1.2 s. On the real recording tiled to those sizes the numbers are 585 ms and 1191 ms. The forward filter was the slowest stage before this change. After it, the reverse filter is the slowest stage, and that stage was left alone.
 - **Reverse filter as one multiply.** The backward half of the filter used to be a Python loop, one electrode at a time. It is now one multiply across all electrodes. A thread pool around each millisecond was slower than the original loop, so the CPU path does not start one. `per_array_threads` and `per_channel_threads` are still accepted and do not change that path.
 - **GPU, when the machine has one.** Install PyTorch to enable it. `use_gpu="auto"` picks an Apple GPU first, then a GPU that shares the computer's memory, then a separate NVIDIA GPU. Shared memory matters because copying 2048 channels across a bus can cost more than the filter. With no GPU, filtering stays on the CPU and matches the original loop. An Apple GPU uses 32-bit numbers, so the last bits can differ.
 - **Spikes stored without the zeros.** Most milliseconds have no spike. `spike_events` is a list of `(electrode, millisecond)` for the bins that fired. `spikes_sparse` is the same list in a compressed matrix. The full grid is still available. `crossing_events` keeps every sample that crossed threshold, not just one per millisecond.
@@ -151,6 +151,29 @@ These keep the same spikes and the same spike-band power as the original loop.
 ### Lossy
 
 - **Keep every other sample.** `decimate=True` low-pass filters at 6 kHz, then drops every other sample, so 30 kHz becomes 15 kHz. The spike band still gets through. Energy that would fold into that band is reduced first. Spike and power frames stay at one per millisecond. This changes the waveforms, so it is off unless you ask for it.
+
+## Results in two tables
+
+Both tables are printed by the last cell of [notebooks/optimization_results.ipynb](./notebooks/optimization_results.ipynb) ("Results at a glance"). Numbers are from the saved run on a 4-core Intel Xeon with AVX-512, in ms of wall time per second of data; under 1000 is real time.
+
+**What worked.** Each stage timed alone at 1024 electrodes, original method versus replacement. Output is identical.
+
+| stage | original | new | saved | how |
+| --- | ---: | ---: | ---: | --- |
+| Re-reference | 1299 | 57 | 1241 | one 64×64 block per group, built once, instead of rebuilding the full matrix every millisecond |
+| Forward filter | 226 | 60 | 167 | the same Butterworth filter compiled for AVX-512, eight electrodes per instruction |
+| Reverse filter | 1963 | 160 | 1802 | one matrix multiply instead of a Python loop calling `np.convolve` per electrode |
+
+Combined, steady state: 64 electrodes 48 ms, 256 → 145 ms, 1024 → 579 ms, 2048 → 1181 ms. 1024 is real time; 2048 is about 1.2× too slow, and the reverse filter is now the largest stage.
+
+**What did not work.** Each idea was implemented, measured against the same work without it, and removed. "Added" is how much slower it made the pipeline.
+
+| attempt | electrodes | without | with | added | why |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Thread pool around each millisecond | 64 | 211 | 458 | +247 | submitting and collecting pool tasks costs more than a millisecond of work; the interpreter lock keeps NumPy from overlapping |
+| One Python thread per electrode | 64 | 211 | 1672 | +1461 | the same overhead, once per electrode |
+| Fortran-order output buffer, copied back at the end | 1024 | 1086 | 1283 | +197 | the final copy back walks the whole array with a bad stride and costs what the contiguous writes saved |
+| Multi-threaded (OpenMP) forward filter next to the multiply | 1024 | 155 | 13953 | +13798 | two thread pools (OpenMP and BLAS) fight over four cores and the multiply stalls |
 
 ## Which recording the numbers used
 
