@@ -88,7 +88,7 @@ The steps, in order:
 3. **Threshold crossing.** If the filtered voltage falls through that electrode's threshold during the millisecond, count one spike. Extra crossings in the same millisecond do not add more spikes.
 4. **Spike-band power.** Square the filtered voltage, take ten times the log, and average over the millisecond. This tracks similar activity without using a threshold.
 
-[baseline.ipynb](./notebooks/baseline.ipynb) runs these steps on the example recording. [notebooks/09-21_optimizations.ipynb](./notebooks/09-21_optimizations.ipynb) times the fast version of the same steps.
+[baseline.ipynb](./notebooks/baseline.ipynb) runs these steps on the example recording. [notebooks/optimization_results.ipynb](./notebooks/optimization_results.ipynb) times the fast version of the same steps.
 
 The paragraphs below are the same steps with the usual names and the papers they come from.
 
@@ -116,7 +116,7 @@ Spike-band power is an alternative to threshold crossings that is meant to captu
 
 ## Optimizations
 
-These are implemented in [`notebooks/optimizations.py`](./notebooks/optimizations.py) and used by the processing loop in [`baseline.ipynb`](./notebooks/baseline.ipynb). Lossless options reproduce the baseline spikes and spike-band power. Decimation is off unless you ask for it, because it changes the waveforms. Before-and-after numbers are in [`notebooks/09-21_optimizations.ipynb`](./notebooks/09-21_optimizations.ipynb).
+These are implemented in [`notebooks/optimizations.py`](./notebooks/optimizations.py) and used by the processing loop in [`baseline.ipynb`](./notebooks/baseline.ipynb). Lossless options reproduce the baseline spikes and spike-band power. Decimation is off unless you ask for it, because it changes the waveforms. Before-and-after numbers are in [`notebooks/optimization_results.ipynb`](./notebooks/optimization_results.ipynb).
 
 ```python
 from optimizations import OptimizedProcessor
@@ -154,7 +154,7 @@ These keep the same spikes and the same spike-band power as the original loop.
 
 ## Which recording the numbers used
 
-Two recordings. Both are in [notebooks/09-21_optimizations.ipynb](./notebooks/09-21_optimizations.ipynb).
+Two recordings. Both are in [notebooks/optimization_results.ipynb](./notebooks/optimization_results.ipynb).
 
 **The real one.** `data/NSP1_aligned.ns6` is a Blackrock recording from a Utah-array implant: 128 electrodes, 30 kHz, about 96 seconds, about 706 MB. It is not stored in git; step 2 above downloads it. Thresholds are −3.5 times each electrode's RMS and the re-reference is a linear regression fit inside each 64-electrode group, both from `calc_params.py` on the first 60 seconds. The first 10 seconds go through the original loop and the fast processor. On this file the two paths return the same 26,611 spikes, with 0 mismatched bins and 0 difference in the filtered voltage and the spike-band power. `baseline.ipynb` runs the same file and plots the spikes.
 
