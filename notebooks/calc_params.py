@@ -1,8 +1,21 @@
 #! /usr/bin/env python
-"""
-Takes data from an NSX file and computes voltage thresholds
-and spike rate normalization parameters,
-then stores both in a JSON file
+"""Estimate thresholds and re-reference weights from a real NSX recording.
+
+This is the offline setup step, not the millisecond loop. It reads a
+Blackrock ``.ns6`` file and writes a JSON file that ``baseline.ipynb``
+loads. The online processor applies those saved numbers. It does not
+recompute them.
+
+What it estimates:
+
+- Noise on each electrode, after an optional 250-5000 Hz filter. The
+  threshold is a multiple of that root-mean-square voltage. The usual
+  multiple is ``-4.5``. An electrode that never varies gets a threshold
+  of ``-1e6`` so it never counts as a spike.
+- Re-reference weights. A common average uses an equal mix inside each
+  electrode group. A linear regression reference fits a mix for each
+  electrode from the others in its group. ``-d 60`` uses only the first
+  60 seconds, so a long file is not loaded twice.
 
 Usage:
     python calc_params.py -f file.nsx
@@ -31,17 +44,11 @@ from utils import plot_txpanel
 
 
 def common_average_reference(data, group_list):
-    """
-    common average reference by group
-    
-    Parameters
-    ----------
-    data : array_like
-        An 2-dimensional input array with shape
-        [channel x time]
-    group_list : list
-        List of lists of channels grouped together across
-        which to compute a common average reference
+    """Subtract each group's average from every electrode in that group.
+
+    Electrodes in a group often hear the same noise. Removing the average
+    leaves the part that differed across electrodes. ``data`` is shaped
+    ``(electrodes, time)`` and is modified in place.
     """
     for g in group_list:
         data[g, :] -= data[g, :].mean(axis=0, keepdims=True)
@@ -421,6 +428,12 @@ logging.debug('Finished filtering')
 
 @numba.jit('float64[:,:](float64[:,:], float64[:,:])', nopython=True)
 def rereference_data(data, reref_params):
+    """Apply ``y = (I - P) x`` for one window.
+
+    ``P`` holds the re-reference weights. Same mix as
+    ``utils.rereference_data``. This copy is compiled with numba because
+    ``calc_params.py`` calls it while fitting weights.
+    """
     data = np.ascontiguousarray(data)
     reref_mat = np.eye(reref_params.shape[0]) - reref_params
     reref_data = reref_mat @ data

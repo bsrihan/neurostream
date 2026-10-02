@@ -98,6 +98,7 @@ dependencies:
       - isoduration==20.11.0
       - isort==6.0.1
       - jinja2==3.1.6
+      - joblib==1.6.0
       - json5==0.12.1
       - jsonpointer==3.0.0
       - jsonschema==4.25.1
@@ -122,6 +123,7 @@ dependencies:
       - nbformat==5.10.4
       - notebook==7.4.5
       - notebook-shim==0.2.4
+      - numba==0.67.0
       - numpy==2.3.3
       - pandocfilters==1.5.1
       - pillow==11.3.0
@@ -152,4 +154,3 @@ dependencies:
       - websocket-client==1.8.0
       - widgetsnbextension==4.0.14
       - yapf==0.43.0
-prefix: /home/yali4/lib/miniconda3/envs/neurostream
