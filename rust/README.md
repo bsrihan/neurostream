@@ -101,6 +101,19 @@ The graphs are in [`notebooks/rust_results.ipynb`](./notebooks/rust_results.ipyn
 
 Beating our own original loop is not a comparison a reader can use, so [`notebooks/tool_comparison.ipynb`](./notebooks/tool_comparison.ipynb) runs one established tool on the same computer and the same 10 s of the recording: the `thresholdExtraction` node from [brand-nsp](https://github.com/brandbci/brand-nsp) (commit `4c891da`), which is the processing path the project README cites. The node runs unmodified in its own process through a local Redis server, the way a BRAND graph runs it; `scripts/brand_threshold_extraction.py` publishes its parameters, streams one millisecond per entry, and reads the `crossings` entries back. Both paths get the same CAR thresholds, and the node's output is aligned to ours by the 4 ms filter delay (its timestamps; also confirmed by a lag scan) before counting.
 
-Result: 0 of 29,974 spikes differ over 10 s; 0 over 60 s; the node's int16 waveform is within 1 LSB of ours. The first run disagreed in 9,629 bins, which turned out to be `calc_params.py` writing diagonal-only CAR weights (`reref_params[g, g]`); the script now fills the block and the file was regenerated. The whole-file `sosfiltfilt` fallback was not needed; the notebook would say so if it were.
+| path | batch or streaming | spikes, 10 s | bins that differ from the tool | wall time (ms per s of data) |
+| --- | --- | ---: | ---: | ---: |
+| brand-nsp `thresholdExtraction` (`4c891da`) | streaming (1 ms packets through Redis, 4 ms look-ahead) | 29,974 | — | 574 |
+| Python kept path (`OptimizedProcessor`) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 142 |
+| Rust (kept path) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 37 |
+| *60 s, same three paths* | streaming | 174,453 / 174,453 | 0 of 7,679,488 | tool 537, Rust 41 |
+
+What the tool was allowed to see that the streaming path was not: nothing in the signal path. It received the same 1 ms packets, the same 4 ms look-ahead and the same thresholds; the one thing it had that a live run would not is that all of the data was already sitting in Redis before it started, so its wall time contains no waiting for packets to arrive. The thresholds are the only batch element: both paths were handed the same values, computed offline by `calc_params.py` from a whole-file `sosfiltfilt` of the first 60 s.
+
+- The tool sees the same stretch and the same thresholds: first 10 s of `NSP1_aligned.ns6` fed to both; one thresholds file handed to the node and to the kept path.
+- Spike comparisons are aligned for filter delay: shift of 4 ms from the node's own timestamps; a lag scan puts the minimum at 4 ms.
+- Wall time is measured on the same machine: every number from one run of the notebook on this host.
+
+The first run disagreed in 9,629 bins, which turned out to be `calc_params.py` writing diagonal-only CAR weights (`reref_params[g, g]`); the script now fills the block and the file was regenerated. The whole-file `sosfiltfilt` fallback was not needed; the notebook would say so if it were. The tool's wall time includes the Redis read and write it does every millisecond, which is how the node runs in BRAND.
 
 Requirements for that notebook: `redis-server` on PATH, `pip install redis pyyaml sh coloredlogs`, and the `brand` package (`git clone https://github.com/brandbci/brand && pip install brand/lib/python`). brand-nsp is cloned on first use.
