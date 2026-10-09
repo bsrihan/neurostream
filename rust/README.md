@@ -23,9 +23,11 @@ rust/
     params.rs     the JSON parameter file calc_params.py writes
     python.rs     PyO3 bindings (feature "python")
     bin/bench.rs  neurostream-bench
+  scripts/
+    brand_threshold_extraction.py   runs brand-nsp thresholdExtraction through Redis, aligns its output
   notebooks/
-    rust_results.ipynb      graphs: stage split, Rust vs Python, threads, agreement
-    tool_comparison.ipynb   the kept path against an established tool on the same recording
+    rust_results.ipynb      graphs: agreement with the Python path, stage split, lanes, real recording
+    tool_comparison.ipynb   the kept path against brand-nsp thresholdExtraction on the same stretch
 ```
 
 Notebook folders hold only `.ipynb` files.
@@ -80,17 +82,25 @@ out["spike_band_power"]  # (n_channels, n_windows) float32
 
 ## Numbers
 
-Steady state, this machine (4-core Intel Xeon, Sapphire Rapids, AVX-512), milliseconds of compute per second of data; under 1000 is real time. Synthetic data, 200 windows, median of three runs. The Python column is the kept path (`OptimizedProcessor`, single thread) from `original/notebooks/optimization_results.ipynb`.
+Steady state, this machine (4-core Intel Xeon, Sapphire Rapids, AVX-512), milliseconds of compute per second of data; under 1000 is real time. Synthetic data, 200 windows, median of three runs, all measured in the same run of `notebooks/rust_results.ipynb`. The Python column is the kept path (`OptimizedProcessor`, single thread).
 
 | channels | Rust, 1 thread | Rust, 4 lanes | Python kept path |
 | --- | --- | --- | --- |
-| 64 | 18 | 18 (one group, one lane) | 48 |
-| 256 | 65 | 42 | 145 |
-| 1024 | 352 | 138 | 579 |
-| 2048 | 813 | 324 | 1181 |
+| 64 | 17 | 17 (one group, one lane) | 47 |
+| 256 | 70 | 69 | 167 |
+| 1024 | 362 | 179 | 646 |
+| 2048 | 839 | 472 | 1435 |
 
-Single-thread stage split at 1024 channels: re-reference 71, forward 45, reverse 165, features 40, write 4. The reverse filter is the largest stage; it runs near the one-fused-multiply-add-per-cycle rate of this CPU.
+Single-thread stage split at 1024 channels: re-reference 71, forward 45, reverse 179, features 40, write 4. The reverse filter is the largest stage; it runs near the one-fused-multiply-add-per-cycle rate of this CPU. Multi-lane numbers move by 20-30% between runs on this shared 4-vCPU guest; single-thread numbers are steadier.
 
 The public 128-channel recording, first 10 seconds, LRR parameters: 33 ms per second of data, one thread. Against the Python kept path on the same stretch: 0 of 26,611 spikes differ, re-referenced data identical, filtered waveform within 4e-6 of 1055 (float32 rounding), spike-band power within 1.2e-5 dB.
 
-The graphs are in [`notebooks/rust_results.ipynb`](./notebooks/rust_results.ipynb). The comparison against an established tool is in [`notebooks/tool_comparison.ipynb`](./notebooks/tool_comparison.ipynb).
+The graphs are in [`notebooks/rust_results.ipynb`](./notebooks/rust_results.ipynb).
+
+## Against an established tool
+
+Beating our own original loop is not a comparison a reader can use, so [`notebooks/tool_comparison.ipynb`](./notebooks/tool_comparison.ipynb) runs one established tool on the same computer and the same 10 s of the recording: the `thresholdExtraction` node from [brand-nsp](https://github.com/brandbci/brand-nsp) (commit `4c891da`), which is the processing path the project README cites. The node runs unmodified in its own process through a local Redis server, the way a BRAND graph runs it; `scripts/brand_threshold_extraction.py` publishes its parameters, streams one millisecond per entry, and reads the `crossings` entries back. Both paths get the same CAR thresholds, and the node's output is aligned to ours by the 4 ms filter delay (its timestamps; also confirmed by a lag scan) before counting.
+
+Result: 0 of 29,974 spikes differ over 10 s; 0 over 60 s; the node's int16 waveform is within 1 LSB of ours. The first run disagreed in 9,629 bins, which turned out to be `calc_params.py` writing diagonal-only CAR weights (`reref_params[g, g]`); the script now fills the block and the file was regenerated. The whole-file `sosfiltfilt` fallback was not needed; the notebook would say so if it were.
+
+Requirements for that notebook: `redis-server` on PATH, `pip install redis pyyaml sh coloredlogs`, and the `brand` package (`git clone https://github.com/brandbci/brand && pip install brand/lib/python`). brand-nsp is cloned on first use.
