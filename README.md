@@ -1,42 +1,60 @@
 # neurostream
-Ultra-low latency signal processing library for neural data (work in progress)
 
-**Design requirements**: Re-reference, filter, and extract features from 2048-channel 30 kHz microelectrode array data in real-time with an output rate of up to 1 kHz   
-**Constraints**: Runs on desktop PCs and laptops (with or without GPUs) using Linux (preferred) or macOS
+Ultra-low latency signal processing for neural data: re-reference, filter, and extract spikes and spike-band power from 2048-channel 30 kHz microelectrode-array recordings, one millisecond at a time.
 
-## Signal Processing
+The repository is split in two trees that share one recording.
 
-This section summarizes the standard signal processing steps used on data from microelectrode arrays. For a code example, see [baseline.ipynb](./notebooks/baseline.ipynb).
+| folder | what is in it |
+| --- | --- |
+| [`original/`](./original) | The Python project. `src/` holds the original millisecond loop (`utils.py`), the parameter script (`calc_params.py`), and the optimized `OptimizedProcessor` (`optimizations.py`, `x86_forward.py`). `notebooks/` holds `baseline.ipynb` and `optimization_results.ipynb`. `tests/` checks that the fast path matches the original loop. |
+| [`rust/`](./rust) | The Rust rewrite of the same pipeline, with a Python module built by maturin so the notebooks can call it. `notebooks/rust_results.ipynb` is the graphs: agreement with the Python path, stage split, lanes, real recording. `notebooks/tool_comparison.ipynb` runs one established tool (brand-nsp `thresholdExtraction`) on the same stretch of the recording and counts disagreements. `scripts/` holds the harness that runs that tool through Redis. |
+| `data/` | The public recording `NSP1_aligned.ns6` and the parameter files. Git-ignored; `original/scripts/fetch_example_data.sh` downloads it here. |
 
-### Re-referencing
+Notebook folders contain only `.ipynb` files. Code lives in `original/src/`, `rust/src/` and `rust/scripts/`.
 
-The raw data consists of voltage measurements relative to a set of reference electrodes. This data can still have noise that is correlated across channels, so it is often desirable to apply a common-average reference or a linear regression reference. See [re_reference.py](https://github.com/brandbci/brand-nsp/blob/main/nodes/re_reference/re_reference.py) in `brand-nsp` for an example of how this is done.
+## Where things stand
 
-### Filtering
+Milliseconds of compute per second of data on a 4-core Intel Xeon (AVX-512); under 1000 is real time. Steady state, synthetic data, single thread unless noted; one run of `rust/notebooks/rust_results.ipynb`.
 
-After re-referencing, the neural data is filtered with either a high-pass or band-pass filter. For neural spiking activity (a.k.a action potentials or threshold crossings), the frequency range of interest is typically 250-5000 Hz. [Masse et al 2014](https://pmc.ncbi.nlm.nih.gov/articles/PMC4169749/) showed that zero-phase acausal filtering is better for spike detection than causal filtering. When using this acausal filtering approach, we maintain a 4 ms buffer of data and run the backwards pass of the filter over that buffer to cancel out the phase shift caused by the forward pass.
+| electrodes | original loop | Python kept path | Rust, 1 thread | Rust, 4 lanes |
+| --- | --- | --- | --- | --- |
+| 64 | 195 | 47 | 17 | 17 |
+| 256 | 766 | 167 | 70 | 69 |
+| 1024 | 4052 | 646 | 362 | 179 |
+| 2048 | 13446 | 1435 | 839 | 472 |
 
-### Thresholding
+All three give the same spikes on the real recording (0 of 26,611 bins differ). Against one established tool, brand-nsp `thresholdExtraction`, run unmodified through Redis on the same stretch with shared thresholds and aligned for the 4 ms filter delay (`rust/notebooks/tool_comparison.ipynb`):
 
-For each channel, set a threshold that is a multiple of the root mean square (RMS) voltage (typically -4.5 * RMS). This threshold can be set once using a minute of sample data at the start of a recording session or it can be updated with a running window throughout the recording. See [calcThreshNorm.py](https://github.com/brandbci/brand-nsp/blob/main/derivatives/calcThreshNorm/calcThreshNorm.py) for an example of how thresholds are calculated.
+| path | batch or streaming | spikes, 10 s | bins that differ from the tool | wall time (ms per s of data) |
+| --- | --- | ---: | ---: | ---: |
+| brand-nsp `thresholdExtraction` (`4c891da`) | streaming (1 ms packets through Redis, 4 ms look-ahead) | 29,974 | — | 574 |
+| Python kept path (`OptimizedProcessor`) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 142 |
+| Rust (kept path) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 37 |
+| *60 s, same three paths* | streaming | 174,453 / 174,453 | 0 of 7,679,488 | tool 537, Rust 41 |
 
-### Threshold crossings
+What the tool was allowed to see that the streaming path was not: nothing in the signal path. It received the same 1 ms packets, the same 4 ms look-ahead and the same thresholds; the one thing it had that a live run would not is that all of the data was already sitting in Redis before it started, so its wall time contains no waiting for packets to arrive. The thresholds are the only batch element: both paths were handed the same values, computed offline by `calc_params.py` from a whole-file `sosfiltfilt` of the first 60 s.
 
-Detect times when a channel's voltage drops below its threshold and count those as spikes. Neurons cannot spike faster than 1 kHz, so, if you detect multiple threshold crossings within a 1 millisecond window, only the first one should be counted. Theoretically, you can pick up real spikes that are less than 1 millisecond apart if each spike comes from a different neuron, but this is rare and often ignored in practice. Spike-sorting methods would be able to estimate which signals are coming from which neuron, but they are costly to run in real-time and not needed to get an accurate estimate of neural activity ([Trautmann et al 2019](https://pmc.ncbi.nlm.nih.gov/articles/PMC7002296/)). See [thresholdExtraction.py](https://github.com/brandbci/brand-nsp/blob/main/nodes/thresholdExtraction/thresholdExtraction.py) in `brand-nsp` for an example of how filtering and spike detection is done.
+- The tool sees the same stretch and the same thresholds: first 10 s of `NSP1_aligned.ns6` fed to both; one thresholds file handed to the node and to the kept path.
+- Spike comparisons are aligned for filter delay: shift of 4 ms from the node's own timestamps; a lag scan puts the minimum at 4 ms.
+- Wall time is measured on the same machine: every number from one run of the notebook on this host.
 
-### Spike-band power
+That comparison also found that `calc_params.py` was writing diagonal-only CAR weights (now fixed; the LRR file every earlier number used was unaffected).
 
-Spike-band power is an alternative to threshold crossings that is meant to capture similar activity without the use of thresholds ([Nason et al 2020](https://pmc.ncbi.nlm.nih.gov/articles/PMC7982996/)). To extract it, filter the data to the spike band (250-5000 Hz or 300-1000 Hz) and square the result. Then, you can either take the log of the resulting signal or leave it as-is. To downsample the signal from 30 kHz to 1 kHz, take the mean power within each 1 ms window. See [bpExtraction.py](https://github.com/brandbci/brand-nsp/blob/main/nodes/bpExtraction/bpExtraction.py) in `brand-nsp` for an example of how spike-band power extraction is done.
+## Quick start
 
-## Potential Optimizations
+```bash
+# recording (706 MB) and parameters
+./original/scripts/fetch_example_data.sh
+cd original/src
+python calc_params.py -f ../../data/NSP1_aligned.ns6 -o ../../data/NSP1_aligned_params.json -t -3.5 --reref lrr -d 60
+python calc_params.py -f ../../data/NSP1_aligned.ns6 -o ../../data/NSP1_aligned_params_car.json -t -3.5 --reref car -d 60
+cd ../..
 
-### Lossless
+# Python tree
+cd original && python -m unittest tests.test_optimizations && cd ..
 
-- Process data from each multi-electrode array in a separate thread
-- After re-referencing, run filtering and feature extraction for each channel in a separate thread
-- Use GPUs for filtering, particularly on machines with unified memory
-- Encode spikes as events or sparse arrays instead of dense arrays. This would save disk space and bandwidth but probably makes real-time processing slower.
+# Rust tree (see rust/README.md)
+cd rust && cargo test --release && cargo build --release && pip install maturin && maturin develop --release
+```
 
-### Lossy
-
-- Decimate the raw signal from 30 kHz to 15 kHz by skipping every other sample (must apply low-pass anti-aliasing filter first)
+Each tree's own README explains what it measures and where the numbers come from.
