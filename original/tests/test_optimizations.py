@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import scipy.signal
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from optimizations import (  # noqa: E402
     AntiAliasDecimator,

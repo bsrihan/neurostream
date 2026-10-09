@@ -3,7 +3,8 @@
 #
 #     ./scripts/fetch_example_data.sh [dest_dir]
 #
-# Destination defaults to ./data, which is git-ignored. Safe to re-run: a
+# Destination defaults to the repository's top-level data/ directory (shared by
+# the original/ and rust/ trees), which is git-ignored. Safe to re-run: a
 # complete file is skipped and a partial one is discarded and re-fetched.
 #
 # gin.g-node.org answers range requests with a plain 200 and the full
@@ -19,7 +20,7 @@ set -euo pipefail
 URL="https://gin.g-node.org/NIN/V1_V4_1024_electrode_resting_state_data/raw/bcf0f801f14e409ee12133aa305293cd32b1707f/data/L_SNR_250717/raw/NSP1_aligned.ns6"
 EXPECTED_BYTES=740453187
 
-DEST_DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/data}"
+DEST_DIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)/data}"
 DEST="$DEST_DIR/NSP1_aligned.ns6"
 
 mkdir -p "$DEST_DIR"
