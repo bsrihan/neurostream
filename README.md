@@ -124,13 +124,13 @@ Beating our own original loop is not a comparison a reader can use, so [`noteboo
 
 | path | batch or streaming | spikes, 10 s | bins that differ from the tool | wall time (ms per s of data) |
 | --- | --- | ---: | ---: | ---: |
-| brand-nsp `thresholdExtraction` (`4c891da`) | streaming (1 ms packets through Redis, 4 ms look-ahead) | 29,974 | — | 574 |
-| Python kept path (`OptimizedProcessor`) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 142 |
-| Rust (kept path) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 37 |
-| *60 s, same three paths* | streaming | 174,453 / 174,453 | 0 of 7,679,488 | tool 537, Rust 41 |
+| brand-nsp `thresholdExtraction` (`4c891da`) | streaming (1 ms packets through Redis, 4 ms look-ahead) | 29,974 | — | 635 |
+| Python kept path (`OptimizedProcessor`) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 168 |
+| Rust (kept path) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 43 |
+| *60 s, same three paths* | streaming | 174,453 / 174,453 | 0 of 7,679,488 | tool 614, Rust 46 |
 
 What the tool was allowed to see that the streaming path was not: nothing in the signal path. It received the same 1 ms packets, the same 4 ms look-ahead and the same thresholds; the one thing it had that a live run would not is that all of the data was already sitting in Redis before it started, so its wall time contains no waiting for packets to arrive. The thresholds are the only batch element: both paths were handed the same values, computed offline by `calc_params.py` from a whole-file `sosfiltfilt` of the first 60 s. The tool's wall time includes the Redis read and write it does every millisecond, which is how the node runs in BRAND.
 
-The first run disagreed in 9,629 bins, which turned out to be `calc_params.py` writing diagonal-only CAR weights (`reref_params[g, g]`); the script now fills the block and the file was regenerated. The whole-file `sosfiltfilt` fallback was not needed; the notebook would say so if it were.
+The first run disagreed in thousands of bins (12,236 with the current recording and thresholds; the notebook recomputes this), which turned out to be `calc_params.py` writing diagonal-only CAR weights (`reref_params[g, g]`); the script now fills the block and the file was regenerated. The whole-file `sosfiltfilt` fallback was not needed; the notebook would say so if it were.
 
 Requirements for that notebook: `redis-server` on PATH, `pip install redis pyyaml sh coloredlogs`, and the `brand` package (`git clone https://github.com/brandbci/brand && pip install brand/lib/python`). brand-nsp is cloned on first use.
