@@ -107,14 +107,14 @@ Steady state, a 4-core Intel Xeon (Sapphire Rapids, AVX-512), milliseconds of co
 
 | channels | Rust, 1 thread | Rust, 4 lanes | Python kept path |
 | --- | --- | --- | --- |
-| 64 | 17 | 17 (one group, one lane) | 47 |
-| 256 | 70 | 69 | 167 |
-| 1024 | 362 | 179 | 646 |
-| 2048 | 839 | 472 | 1435 |
+| 64 | 20 | 18 (one group, one lane) | 52 |
+| 256 | 76 | 53 | 206 |
+| 1024 | 384 | 148 | 864 |
+| 2048 | 868 | 377 | 1473 |
 
-Single-thread stage split at 1024 channels: re-reference 71, forward 45, reverse 179, features 40, write 4. The reverse filter is the largest stage; it runs near the one-fused-multiply-add-per-cycle rate of this CPU. Multi-lane numbers move by 20-30% between runs on this shared 4-vCPU guest; single-thread numbers are steadier.
+Single-thread stage split at 1024 channels (`neurostream-bench synthetic --channels 1024 --threads 1`, one run): re-reference 80, forward 52, reverse 216, features 43, write 6. The reverse filter is the largest stage; it runs near the one-fused-multiply-add-per-cycle rate of this CPU. Multi-lane numbers move by 20-30% between runs on this shared 4-vCPU guest; single-thread numbers are steadier.
 
-The public 128-channel recording, first 10 seconds, LRR parameters: 33 ms per second of data, one thread. Against the Python kept path on the same stretch: 0 of 26,611 spikes differ, re-referenced data identical, filtered waveform within 4e-6 of 1055 (float32 rounding), spike-band power within 1.2e-5 dB.
+The public 128-channel recording, first 10 seconds, LRR parameters: 35 ms per second of data, one thread. Against the Python kept path on the same stretch: 0 of 26,611 spikes differ, re-referenced data identical, filtered waveform within 4e-6 (float32 rounding), spike-band power within 1.1e-5 dB.
 
 The graphs are in [`notebooks/rust_results.ipynb`](./notebooks/rust_results.ipynb).
 
