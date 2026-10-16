@@ -1,6 +1,6 @@
-# neurostream (Python, original tree)
+# neurostream (Python)
 
-Ultra-low latency signal processing library for neural data (work in progress). This folder is the Python project: the original millisecond loop, the optimized `OptimizedProcessor`, and the notebooks that measure them. The Rust rewrite and the comparison against an established tool live in [`../rust`](../rust). Notebooks are in `notebooks/` (only `.ipynb`), Python modules in `src/`, and the shared recording in the repository's top-level `data/`.
+Ultra-low latency signal processing library for neural data (work in progress). This repository is the Python project: the original millisecond loop, the optimized `OptimizedProcessor`, and the notebooks that measure them. The Rust rewrite of the same pipeline, and the comparison against an established tool, live in [bsrihan/neurostream](https://github.com/bsrihan/neurostream); its notebooks import `src/` from a checkout of this repository placed next to it. Notebooks are in `notebooks/` (only `.ipynb`), Python modules in `src/`, and the recording in `data/`.
 
 **Design requirements**: Re-reference, filter, and extract features from 2048-channel 30 kHz microelectrode array data in real-time with an output rate of up to 1 kHz   
 **Constraints**: Runs on desktop PCs and laptops (with or without GPUs) using Linux (preferred) or macOS
@@ -49,8 +49,8 @@ recording the numbers used" below.
 ```bash
 cd src
 python calc_params.py \
-    -f ../../data/NSP1_aligned.ns6 \
-    -o ../../data/NSP1_aligned_params.json \
+    -f ../data/NSP1_aligned.ns6 \
+    -o ../data/NSP1_aligned_params.json \
     -t -3.5 --reref lrr --plot_spike_panel \
     -d 60
 ```
