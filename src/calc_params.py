@@ -480,7 +480,9 @@ reref_params = np.zeros((n_channels, n_channels), dtype=np.float64)
 if reref == 'car':
     for g in reref_groups:
         if len(g) > 0:  # Only process non-empty groups
-            reref_params[g, g] = 1. / len(g)
+            # np.ix_ fills the whole group block; [g, g] would set only
+            # the diagonal and leave the common average out.
+            reref_params[np.ix_(g, g)] = 1. / len(g)
 
 elif reref == 'lrr':
     # use single-precision for faster compute
