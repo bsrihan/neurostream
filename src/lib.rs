@@ -34,6 +34,9 @@ pub mod nsx;
 pub mod params;
 pub mod reref;
 
+#[cfg(feature = "python")]
+mod python;
+
 
 use std::time::Instant;
 
