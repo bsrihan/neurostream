@@ -1,5 +1,6 @@
-# neurostream
-Ultra-low latency signal processing library for neural data (work in progress)
+# neurostream (Python, original tree)
+
+Ultra-low latency signal processing library for neural data (work in progress). This folder is the Python project: the original millisecond loop, the optimized `OptimizedProcessor`, and the notebooks that measure them. The Rust rewrite and the comparison against an established tool live in [`../rust`](../rust). Notebooks are in `notebooks/` (only `.ipynb`), Python modules in `src/`, and the shared recording in the repository's top-level `data/`.
 
 **Design requirements**: Re-reference, filter, and extract features from 2048-channel 30 kHz microelectrode array data in real-time with an output rate of up to 1 kHz   
 **Constraints**: Runs on desktop PCs and laptops (with or without GPUs) using Linux (preferred) or macOS
@@ -35,7 +36,7 @@ fails with `NoSuchKernel: neurostream`.
 ./scripts/fetch_example_data.sh
 ```
 
-This writes `data/NSP1_aligned.ns6` (~706 MiB), which is git-ignored. The file
+This writes `../data/NSP1_aligned.ns6` (~706 MiB, top-level `data/`, shared with the Rust tree), which is git-ignored. The file
 holds 128 channels sampled at 30 kHz for about 96 seconds; the 1024 electrodes
 in the dataset name are split across several NSPs. `baseline.ipynb` is the
 notebook that reads this file. The timing notebook does not. See "Which
@@ -43,14 +44,13 @@ recording the numbers used" below.
 
 ### 3. Compute thresholds and re-referencing parameters
 
-`calc_params.py` and the notebook both resolve `utils` and their data paths
-relative to `notebooks/`, so run them from there:
+`calc_params.py` resolves `utils` relative to `src/`, so run it from there:
 
 ```bash
-cd notebooks
+cd src
 python calc_params.py \
-    -f ../data/NSP1_aligned.ns6 \
-    -o ../data/NSP1_aligned_params.json \
+    -f ../../data/NSP1_aligned.ns6 \
+    -o ../../data/NSP1_aligned_params.json \
     -t -3.5 --reref lrr --plot_spike_panel \
     -d 60
 ```
@@ -69,8 +69,11 @@ recommends, and `baseline.ipynb` only processes the first 10 seconds anyway.
 ### 4. Run the pipeline
 
 ```bash
+cd notebooks
 jupyter lab baseline.ipynb
 ```
+
+The notebooks add `../src` to `sys.path` in their first cell, so the modules import without installing anything.
 
 The notebook reads the recording and the JSON from step 3, processes the data
 one millisecond at a time, and plots spikes and spike-band power.
@@ -116,7 +119,7 @@ Spike-band power is an alternative to threshold crossings that is meant to captu
 
 ## Optimizations
 
-These are implemented in [`notebooks/optimizations.py`](./notebooks/optimizations.py) and used by the processing loop in [`baseline.ipynb`](./notebooks/baseline.ipynb). Lossless options reproduce the baseline spikes and spike-band power. Decimation is off unless you ask for it, because it changes the waveforms. Before-and-after numbers are in [`notebooks/optimization_results.ipynb`](./notebooks/optimization_results.ipynb).
+These are implemented in [`src/optimizations.py`](./src/optimizations.py) and used by the processing loop in [`baseline.ipynb`](./notebooks/baseline.ipynb). Lossless options reproduce the baseline spikes and spike-band power. Decimation is off unless you ask for it, because it changes the waveforms. Before-and-after numbers are in [`notebooks/optimization_results.ipynb`](./notebooks/optimization_results.ipynb).
 
 ```python
 from optimizations import OptimizedProcessor
@@ -136,7 +139,7 @@ result.spike_events    # (channel, millisecond) for each spike
 result.spikes_sparse   # CSR matrix of the same raster
 ```
 
-Run that from `notebooks/`, which is also where `baseline.ipynb` imports it.
+Run that with `src/` on `sys.path`, which is what the notebooks do in their first cell.
 
 ### Lossless
 
@@ -179,7 +182,7 @@ Combined, steady state: 64 electrodes 48 ms, 256 → 145 ms, 1024 → 579 ms, 20
 
 Two recordings. Both are in [notebooks/optimization_results.ipynb](./notebooks/optimization_results.ipynb).
 
-**The real one.** `data/NSP1_aligned.ns6` is a Blackrock recording from a Utah-array implant: 128 electrodes, 30 kHz, about 96 seconds, about 706 MB. It is not stored in git; step 2 above downloads it. Thresholds are −3.5 times each electrode's RMS and the re-reference is a linear regression fit inside each 64-electrode group, both from `calc_params.py` on the first 60 seconds. The first 10 seconds go through the original loop and the fast processor. On this file the two paths return the same 26,611 spikes, with 0 mismatched bins and 0 difference in the filtered voltage and the spike-band power. `baseline.ipynb` runs the same file and plots the spikes.
+**The real one.** `../data/NSP1_aligned.ns6` is a Blackrock recording from a Utah-array implant: 128 electrodes, 30 kHz, about 96 seconds, about 706 MB. It is not stored in git; step 2 above downloads it. Thresholds are −3.5 times each electrode's RMS and the re-reference is a linear regression fit inside each 64-electrode group, both from `calc_params.py` on the first 60 seconds. The first 10 seconds go through the original loop and the fast processor. On this file the two paths return the same 26,611 spikes, with 0 mismatched bins and 0 difference in the filtered voltage and the spike-band power. `baseline.ipynb` runs the same file and plots the spikes.
 
 **The synthetic one.** The real file has 128 electrodes. The 1024- and 2048-electrode timing rows need more, so the notebook also builds a recording in memory: groups of 64 electrodes, Gaussian noise, and a short negative pulse every 10 ms on one electrode. A second timing table stacks copies of the 128 real electrodes to reach 1024 and 2048, so those rows run on real waveforms with the fitted weights and thresholds repeated per copy.
 
