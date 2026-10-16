@@ -1,0 +1,7 @@
+# Compile for the CPU this is built on. The forward filter and the feature
+# loops are written so the compiler can vectorize them; on an AVX-512 machine
+# that gives eight electrodes per instruction, the same as the Python tree's
+# compiled kernel. The resulting binary and wheel are not portable to another
+# CPU model; remove this file to build a generic x86-64 binary.
+[build]
+rustflags = ["-C", "target-cpu=native"]
