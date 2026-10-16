@@ -3,9 +3,11 @@
 //! Prints one JSON object per line so a notebook can parse it. Times are in
 //! milliseconds of wall time per second of data; under 1000 is real time.
 //!
-//!     neurostream-bench synthetic --channels 64,256,1024,2048 --threads 1,4
-//!     neurostream-bench ns6 --file data/NSP1_aligned.ns6 \
-//!         --params data/NSP1_aligned_params.json --seconds 10 --threads 1,4
+//! ```text
+//! neurostream-bench synthetic --channels 64,256,1024,2048 --threads 1,4
+//! neurostream-bench ns6 --file data/NSP1_aligned.ns6 \
+//!     --params data/NSP1_aligned_params.json --seconds 10 --threads 1,4
+//! ```
 //!
 //! "Steady state" means the processor is already built and has run a few
 //! windows before the clock starts, and the output arrays already exist.
