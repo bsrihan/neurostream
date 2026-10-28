@@ -1,42 +1,136 @@
 # neurostream
-Ultra-low latency signal processing library for neural data (work in progress)
 
-**Design requirements**: Re-reference, filter, and extract features from 2048-channel 30 kHz microelectrode array data in real-time with an output rate of up to 1 kHz   
-**Constraints**: Runs on desktop PCs and laptops (with or without GPUs) using Linux (preferred) or macOS
+Ultra-low latency signal processing for neural data, in Rust: re-reference, forward Butterworth filter, 4 ms reverse filter, threshold crossings and spike-band power, once per millisecond, for up to 2048 electrodes at 30 kHz.
 
-## Signal Processing
+It is a rewrite of the Python project [bsrihan/neurostream-python](https://github.com/bsrihan/neurostream-python) (the original millisecond loop and the optimized `OptimizedProcessor`). It produces the same spikes as that project's kept path (0 disagreements on the public recording) and the same waveforms to float32 rounding, and it has been checked against an established tool, brand-nsp `thresholdExtraction`, on the same stretch of the same recording.
 
-This section summarizes the standard signal processing steps used on data from microelectrode arrays. For a code example, see [baseline.ipynb](./notebooks/baseline.ipynb).
+The crate builds three ways:
 
-### Re-referencing
+- a Rust library (`neurostream`), used by the tests and the benchmark;
+- a benchmark binary, `neurostream-bench`;
+- a Python module, also called `neurostream`, built with maturin, so the notebooks can call it.
 
-The raw data consists of voltage measurements relative to a set of reference electrodes. This data can still have noise that is correlated across channels, so it is often desirable to apply a common-average reference or a linear regression reference. See [re_reference.py](https://github.com/brandbci/brand-nsp/blob/main/nodes/re_reference/re_reference.py) in `brand-nsp` for an example of how this is done.
+## Layout
 
-### Filtering
+```
+Cargo.toml, pyproject.toml, .cargo/config.toml
+src/
+  lib.rs        Processor, Lane, Config; one window or a whole recording
+  design.rs     Butterworth design (butter -> lp2bp -> bilinear -> sos), zi, impulse response
+  reref.rs      (I - P) x per electrode group, one small matrix multiply each
+  filter.rs     forward SOS (state carried between windows); reverse FIR over a ring buffer
+  features.rs   negative threshold crossing, mean 10 log10(x^2)
+  nsx.rs        Blackrock .ns6 reader (time-major int16, no copies)
+  params.rs     the JSON parameter file calc_params.py writes
+  python.rs     PyO3 bindings (feature "python")
+  bin/bench.rs  neurostream-bench
+scripts/
+  paths.py                        where the recording and the Python project are
+  timing.py                       steady-state timing of the three paths, agreement
+  brand_threshold_extraction.py   runs brand-nsp thresholdExtraction through Redis, aligns its output
+  fetch_example_data.sh           downloads the public recording to data/
+notebooks/
+  rust_results.ipynb      graphs: agreement with the Python path, stage split, lanes, real recording
+  tool_comparison.ipynb   the kept path against brand-nsp thresholdExtraction on the same stretch
+data/                     the recording and parameter files (git-ignored)
+```
 
-After re-referencing, the neural data is filtered with either a high-pass or band-pass filter. For neural spiking activity (a.k.a action potentials or threshold crossings), the frequency range of interest is typically 250-5000 Hz. [Masse et al 2014](https://pmc.ncbi.nlm.nih.gov/articles/PMC4169749/) showed that zero-phase acausal filtering is better for spike detection than causal filtering. When using this acausal filtering approach, we maintain a 4 ms buffer of data and run the backwards pass of the filter over that buffer to cancel out the phase shift caused by the forward pass.
+Notebook folders hold only `.ipynb` files; the code behind them is in `scripts/`.
 
-### Thresholding
+## Build and run
 
-For each channel, set a threshold that is a multiple of the root mean square (RMS) voltage (typically -4.5 * RMS). This threshold can be set once using a minute of sample data at the start of a recording session or it can be updated with a running window throughout the recording. See [calcThreshNorm.py](https://github.com/brandbci/brand-nsp/blob/main/derivatives/calcThreshNorm/calcThreshNorm.py) for an example of how thresholds are calculated.
+```bash
+# Rust 1.85 or newer (rustup toolchain install stable)
+cargo test --release            # 13 tests: filter design vs SciPy values, lanes, warm-up, kernels
+cargo build --release
 
-### Threshold crossings
+# steady-state timing, synthetic data, one JSON line per row
+./target/release/neurostream-bench synthetic --channels 64,256,1024,2048 --threads 1,4 --windows 200 --repeats 3
+# the public recording (first 10 s)
+./target/release/neurostream-bench ns6 --file data/NSP1_aligned.ns6 --params data/NSP1_aligned_params.json --seconds 10 --threads 1,4
 
-Detect times when a channel's voltage drops below its threshold and count those as spikes. Neurons cannot spike faster than 1 kHz, so, if you detect multiple threshold crossings within a 1 millisecond window, only the first one should be counted. Theoretically, you can pick up real spikes that are less than 1 millisecond apart if each spike comes from a different neuron, but this is rare and often ignored in practice. Spike-sorting methods would be able to estimate which signals are coming from which neuron, but they are costly to run in real-time and not needed to get an accurate estimate of neural activity ([Trautmann et al 2019](https://pmc.ncbi.nlm.nih.gov/articles/PMC7002296/)). See [thresholdExtraction.py](https://github.com/brandbci/brand-nsp/blob/main/nodes/thresholdExtraction/thresholdExtraction.py) in `brand-nsp` for an example of how filtering and spike detection is done.
+# Python module
+pip install maturin
+maturin develop --release       # or: maturin build --release -o dist && pip install dist/*.whl
+```
 
-### Spike-band power
+`.cargo/config.toml` sets `-C target-cpu=native`. The binary and the wheel are built for the CPU that compiled them; rebuild on the machine you time on.
 
-Spike-band power is an alternative to threshold crossings that is meant to capture similar activity without the use of thresholds ([Nason et al 2020](https://pmc.ncbi.nlm.nih.gov/articles/PMC7982996/)). To extract it, filter the data to the spike band (250-5000 Hz or 300-1000 Hz) and square the result. Then, you can either take the log of the resulting signal or leave it as-is. To downsample the signal from 30 kHz to 1 kHz, take the mean power within each 1 ms window. See [bpExtraction.py](https://github.com/brandbci/brand-nsp/blob/main/nodes/bpExtraction/bpExtraction.py) in `brand-nsp` for an example of how spike-band power extraction is done.
+### The recording and the Python project
 
-## Potential Optimizations
+The notebooks need two things that are not in this repository. `scripts/paths.py` looks for them in these places, or where the environment variables point:
 
-### Lossless
+| what | default | override |
+| --- | --- | --- |
+| `NSP1_aligned.ns6` and the parameter files | `data/` | `NEUROSTREAM_DATA` |
+| the Python project (for the comparison) | `../neurostream-python`, next to this checkout | `NEUROSTREAM_PYTHON` |
 
-- Process data from each multi-electrode array in a separate thread
-- After re-referencing, run filtering and feature extraction for each channel in a separate thread
-- Use GPUs for filtering, particularly on machines with unified memory
-- Encode spikes as events or sparse arrays instead of dense arrays. This would save disk space and bandwidth but probably makes real-time processing slower.
+```bash
+git clone https://github.com/bsrihan/neurostream-python ../neurostream-python
+./scripts/fetch_example_data.sh                                    # 706 MB, into data/
+cd ../neurostream-python/src
+python calc_params.py -f ../../neurostream/data/NSP1_aligned.ns6 -o ../../neurostream/data/NSP1_aligned_params.json -t -3.5 --reref lrr -d 60
+python calc_params.py -f ../../neurostream/data/NSP1_aligned.ns6 -o ../../neurostream/data/NSP1_aligned_params_car.json -t -3.5 --reref car -d 60
+```
 
-### Lossy
+### From Python
 
-- Decimate the raw signal from 30 kHz to 15 kHz by skipping every other sample (must apply low-pass anti-aliasing filter first)
+```python
+import json, numpy as np, neurostream
+
+P = json.load(open("data/NSP1_aligned_params.json"))
+raw, rate = neurostream.read_ns6("data/NSP1_aligned.ns6", max_samples=300_000)  # (n_samples, n_channels) int16
+proc = neurostream.Processor(np.array(P["rereference_parameters"]), np.array(P["thresholds"]).ravel(), P["reref_groups"], threads=1)
+out = proc.process_recording(raw)
+out["spikes"]            # (n_channels, n_windows) int16, same layout as the Python project
+out["filtered"]          # (n_channels, n_samples) float32, first 4 ms NaN
+out["spike_band_power"]  # (n_channels, n_windows) float32
+```
+
+`neurostream.filter_design()` returns the `(sos, zi, reverse_window)` the Rust design produces, for checking against SciPy (they agree to 1e-14). `proc.profile_recording(raw)` returns seconds per stage.
+
+## How it is built
+
+**Time-major everywhere.** A window is `n_samples x n_channels` with channels contiguous, which is the order the `.ns6` file stores samples in. The recording goes from disk into the pipeline without a transpose, and the forward filter and the feature loops walk across electrodes in their inner loop, so the compiler emits one instruction per eight channels (AVX-512) without hand-written SIMD.
+
+**Lanes.** A `Processor` is split into `Lane`s. Each lane owns a contiguous range of channels and every buffer and filter state for them. With `threads=1` there is one lane and no thread pool. With more, each millisecond is processed by all lanes at once on a rayon pool; no lane touches another's memory, so there is nothing to lock. Lane boundaries follow re-reference groups, so a lane never needs another lane's channels. Parameter files whose re-reference weights cross groups (the LRR file for the 128-channel recording) fall back to one lane.
+
+**Reverse filter.** The 4 ms look-ahead buffer is a ring, so a new millisecond is written in place instead of shifting the buffer. The backward filter is a band matrix with 121 taps; it is applied with a tiled kernel that keeps 12 outputs for 16 channels in 24 AVX-512 registers and reads each buffer row once per block (`filter.rs`, `avx512::fir_tiled`). There is a portable fallback for CPUs without AVX-512. The forward output is rounded to float32 before it enters the buffer, as in the Python project, which is why the two agree bit for bit on spikes.
+
+**Spike-band power.** `10 log10(x^2)` is the costliest part of the features stage in Python. Here `log10` is computed in-line from the float exponent and a short series, which vectorizes; NaN, zero and infinity are detected in the same pass and fixed up only for windows that contain them.
+
+**Filter design.** `design.rs` follows SciPy step by step (`butter` -> `lp2bp_zpk` -> `bilinear_zpk` -> `zpk2sos`, pairing `'nearest'`) so the sections, their initial state and the reverse window match `scipy.signal` to 1e-12; the tests hold SciPy's numbers as literals.
+
+## Numbers
+
+Steady state, a 4-core Intel Xeon (Sapphire Rapids, AVX-512), milliseconds of compute per second of data; under 1000 is real time. Synthetic data, 200 windows, median of three runs, all measured in the same run of `notebooks/rust_results.ipynb`. The Python column is the kept path (`OptimizedProcessor`, single thread).
+
+| channels | Rust, 1 thread | Rust, 4 lanes | Python kept path |
+| --- | --- | --- | --- |
+| 64 | 20 | 18 (one group, one lane) | 52 |
+| 256 | 76 | 53 | 206 |
+| 1024 | 384 | 148 | 864 |
+| 2048 | 868 | 377 | 1473 |
+
+Single-thread stage split at 1024 channels (`neurostream-bench synthetic --channels 1024 --threads 1`, one run): re-reference 80, forward 52, reverse 216, features 43, write 6. The reverse filter is the largest stage; it runs near the one-fused-multiply-add-per-cycle rate of this CPU. Multi-lane numbers move by 20-30% between runs on this shared 4-vCPU guest; single-thread numbers are steadier.
+
+The public 128-channel recording, first 10 seconds, LRR parameters: 35 ms per second of data, one thread. Against the Python kept path on the same stretch: 0 of 26,611 spikes differ, re-referenced data identical, filtered waveform within 4e-6 (float32 rounding), spike-band power within 1.1e-5 dB.
+
+The graphs are in [`notebooks/rust_results.ipynb`](./notebooks/rust_results.ipynb).
+
+## Against an established tool
+
+Beating our own original loop is not a comparison a reader can use, so [`notebooks/tool_comparison.ipynb`](./notebooks/tool_comparison.ipynb) runs one established tool on the same computer and the same 10 s of the recording: the `thresholdExtraction` node from [brand-nsp](https://github.com/brandbci/brand-nsp) (commit `4c891da`), which is the processing path the original project cites. The node runs unmodified in its own process through a local Redis server, the way a BRAND graph runs it; `scripts/brand_threshold_extraction.py` publishes its parameters, streams one millisecond per entry, and reads the `crossings` entries back. Both paths get the same CAR thresholds, and the node's output is aligned to ours by the 4 ms filter delay (its timestamps; also confirmed by a lag scan) before counting.
+
+| path | batch or streaming | spikes, 10 s | bins that differ from the tool | wall time (ms per s of data) |
+| --- | --- | ---: | ---: | ---: |
+| brand-nsp `thresholdExtraction` (`4c891da`) | streaming (1 ms packets through Redis, 4 ms look-ahead) | 29,974 | — | 635 |
+| Python kept path (`OptimizedProcessor`) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 168 |
+| Rust (kept path) | streaming (1 ms windows, 4 ms look-ahead) | 29,974 | 0 of 1,279,488 | 43 |
+| *60 s, same three paths* | streaming | 174,453 / 174,453 | 0 of 7,679,488 | tool 614, Rust 46 |
+
+What the tool was allowed to see that the streaming path was not: nothing in the signal path. It received the same 1 ms packets, the same 4 ms look-ahead and the same thresholds; the one thing it had that a live run would not is that all of the data was already sitting in Redis before it started, so its wall time contains no waiting for packets to arrive. The thresholds are the only batch element: both paths were handed the same values, computed offline by `calc_params.py` from a whole-file `sosfiltfilt` of the first 60 s. The tool's wall time includes the Redis read and write it does every millisecond, which is how the node runs in BRAND.
+
+The first run disagreed in thousands of bins (12,236 with the current recording and thresholds; the notebook recomputes this), which turned out to be `calc_params.py` writing diagonal-only CAR weights (`reref_params[g, g]`); the script now fills the block and the file was regenerated. The whole-file `sosfiltfilt` fallback was not needed; the notebook would say so if it were.
+
+Requirements for that notebook: `redis-server` on PATH, `pip install redis pyyaml sh coloredlogs`, and the `brand` package (`git clone https://github.com/brandbci/brand && pip install brand/lib/python`). brand-nsp is cloned on first use.
