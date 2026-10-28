@@ -1,0 +1,23 @@
+[package]
+name = "neurostream"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Millisecond neural signal pipeline in Rust: re-reference, 250-5000 Hz acausal filter, spikes, spike-band power"
+license = "MIT"
+publish = false
+
+[lib]
+name = "neurostream"
+crate-type = ["rlib"]
+
+[dependencies]
+matrixmultiply = "0.3"
+num-complex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
